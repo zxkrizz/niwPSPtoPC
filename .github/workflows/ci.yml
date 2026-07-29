@@ -2,6 +2,10 @@ name: CI
 
 on:
   push:
+    branches:
+      - "master"
+    tags-ignore:
+      - "**"
   pull_request:
   workflow_dispatch:
 
@@ -52,10 +56,11 @@ jobs:
 
       - name: Build with PSPDEV
         run: |
+          PSPDEV_IMAGE=$(cat scripts/pspdev-image.txt)
           docker run --rm \
             --volume "$GITHUB_WORKSPACE:/workspace" \
             --workdir /workspace \
-            pspdev/pspdev:latest \
+            "$PSPDEV_IMAGE" \
             bash ./scripts/build-psp.sh
 
       - name: Package Memory Stick directory

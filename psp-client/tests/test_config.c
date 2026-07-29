@@ -22,6 +22,7 @@ static int write_config(const char *path, const char *contents)
 int main(void)
 {
     char path[] = "/tmp/niwpsptopc-config-XXXXXX";
+    char resolved[128];
     NiwPspToPcConfig config;
     int file_descriptor = mkstemp(path);
 
@@ -39,11 +40,40 @@ int main(void)
         return 1;
     }
 
+    if (config_resolve_path(
+            "ms0:/PSP/GAME/niwPSPtoPC/EBOOT.PBP",
+            resolved,
+            sizeof(resolved)) != 0 ||
+        strcmp(resolved, "ms0:/PSP/GAME/niwPSPtoPC/config.ini") != 0 ||
+        config_resolve_path(
+            "ef0:/PSP/GAME/niwPSPtoPC/EBOOT.PBP",
+            resolved,
+            sizeof(resolved)) != 0 ||
+        strcmp(resolved, "ef0:/PSP/GAME/niwPSPtoPC/config.ini") != 0) {
+        fputs("EBOOT-relative config path resolution failed\n", stderr);
+        unlink(path);
+        return 1;
+    }
+
+    if (config_load("/tmp/niwpsptopc-definitely-missing.ini", &config) !=
+        NIW_PSP_TO_PC_CONFIG_NOT_FOUND) {
+        fputs("Missing config did not preserve defaults\n", stderr);
+        unlink(path);
+        return 1;
+    }
+
     if (write_config(path, "server_port=48000\nsend_rate=30\n") != 0 ||
         config_load(path, &config) != 0 ||
         config.server_port != 48000u ||
         config.send_rate != 30u) {
         fputs("Automatic-discovery configuration was not parsed\n", stderr);
+        unlink(path);
+        return 1;
+    }
+
+    if (write_config(path, "send_rate=14\n") != 0 ||
+        config_load(path, &config) >= 0) {
+        fputs("Unsafe send rate below 15 Hz was accepted\n", stderr);
         unlink(path);
         return 1;
     }

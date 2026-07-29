@@ -268,9 +268,11 @@ static void draw_status_layout(
     const char *pairing_code,
     const char *status,
     const char *detail,
-    uint32_t color)
+    uint32_t color,
+    unsigned int send_rate)
 {
     int code_width;
+    char rate_label[24];
 
     draw_background();
     draw_header(pairing_code);
@@ -303,7 +305,8 @@ static void draw_status_layout(
         color,
         strcmp(status, "CONTROLLER READY") == 0 ? "READY" : "WAITING");
 
-    draw_footer("HOME  EXIT", "V2 / 60 FPS");
+    snprintf(rate_label, sizeof(rate_label), "V2 / %u HZ", send_rate);
+    draw_footer("HOME  EXIT", rate_label);
 }
 
 void ui_init(void)
@@ -405,7 +408,8 @@ void ui_render_connecting(
 void ui_render_sender(
     const char *pairing_code,
     int authorized,
-    int network_error)
+    int network_error,
+    unsigned int send_rate)
 {
     if (network_error != 0) {
         char detail[32];
@@ -414,19 +418,22 @@ void ui_render_sender(
             pairing_code,
             "NETWORK ERROR",
             detail,
-            COLOR_DANGER);
+            COLOR_DANGER,
+            send_rate);
     } else if (authorized) {
         draw_status_layout(
             pairing_code,
             "CONTROLLER READY",
             "PC LINK ACTIVE",
-            COLOR_ACCENT);
+            COLOR_ACCENT,
+            send_rate);
     } else {
         draw_status_layout(
             pairing_code,
             "WAITING FOR PC",
             "ENTER CODE IN DESKTOP APP",
-            COLOR_WARN);
+            COLOR_WARN,
+            send_rate);
     }
 }
 

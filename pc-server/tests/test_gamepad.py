@@ -131,7 +131,8 @@ class ControllerServiceTests(unittest.TestCase):
         self.events = []
         self.service = ControllerService(
             lambda: self.backend,
-            timeout_s=1.5,
+            timeout_s=1.75,
+            neutral_timeout_s=0.5,
             on_event=self.events.append,
             clock=self.clock,
             start_watchdog=False,
@@ -158,7 +159,7 @@ class ControllerServiceTests(unittest.TestCase):
         self.assertEqual(results, [True, True, False, False, True])
         self.assertEqual(len(applies), 3)
 
-    def test_timeout_neutralizes_before_disconnect(self) -> None:
+    def test_silence_neutralizes_then_releases_session_without_unplug(self) -> None:
         self.service.handle_snapshot(
             make_snapshot(
                 0,
@@ -167,21 +168,29 @@ class ControllerServiceTests(unittest.TestCase):
                 analog_x=255,
             )
         )
-        self.clock.now += 1.49
+        self.clock.now += 0.49
         self.assertFalse(self.service.check_timeout())
+        self.assertNotIn("neutralize", self.backend.calls)
 
         self.clock.now += 0.02
-        self.assertTrue(self.service.check_timeout())
-
+        self.assertFalse(self.service.check_timeout())
+        self.assertEqual(self.backend.calls[-1], "neutralize")
+        self.assertTrue(self.service.connected)
+        self.assertTrue(self.service.gamepad_ready)
         self.assertEqual(
-            self.backend.calls[-2:],
-            ["neutralize", "disconnect"],
+            self.events[-1].event,
+            ControllerEventType.NEUTRALIZED,
         )
+
+        self.clock.now += 1.25
+        self.assertTrue(self.service.check_timeout())
         self.assertFalse(self.service.connected)
+        self.assertTrue(self.service.gamepad_ready)
+        self.assertNotIn("disconnect", self.backend.calls)
         self.assertEqual(self.events[-1].event, ControllerEventType.DISCONNECTED)
         self.assertEqual(self.events[-1].reason, "timeout")
 
-    def test_client_change_neutralizes_old_backend_before_new_state(self) -> None:
+    def test_client_change_reuses_the_same_virtual_device(self) -> None:
         self.service.handle_snapshot(make_snapshot(0, SequenceEvent.FIRST))
         other = ("10.0.0.44", 52000)
 
@@ -189,11 +198,21 @@ class ControllerServiceTests(unittest.TestCase):
             make_snapshot(0, SequenceEvent.FIRST, address=other)
         )
 
-        self.assertEqual(self.backend.calls.count("connect"), 2)
-        first_disconnect = self.backend.calls.index("disconnect")
-        second_connect = self.backend.calls.index("connect", 1)
-        self.assertLess(first_disconnect, second_connect)
+        self.assertEqual(self.backend.calls.count("connect"), 1)
+        self.assertNotIn("disconnect", self.backend.calls)
+        self.assertEqual(self.backend.calls[-2], "neutralize")
         self.assertEqual(self.service.address, other)
+
+    def test_backend_preflight_creates_a_neutral_persistent_target(self) -> None:
+        self.assertTrue(self.service.ensure_backend())
+
+        self.assertEqual(self.backend.calls, ["connect", "neutralize"])
+        self.assertTrue(self.service.gamepad_ready)
+        self.assertFalse(self.service.connected)
+        self.assertEqual(
+            self.events[-1].event,
+            ControllerEventType.GAMEPAD_READY,
+        )
 
     def test_watchdog_runs_without_frontend_polling(self) -> None:
         backend = FakeBackend()
@@ -201,6 +220,7 @@ class ControllerServiceTests(unittest.TestCase):
         service = ControllerService(
             lambda: backend,
             timeout_s=0.05,
+            neutral_timeout_s=0.02,
             on_event=lambda event: (
                 disconnected.set()
                 if event.event is ControllerEventType.DISCONNECTED
@@ -211,12 +231,12 @@ class ControllerServiceTests(unittest.TestCase):
             service.handle_snapshot(make_snapshot(0, SequenceEvent.FIRST))
 
             self.assertTrue(disconnected.wait(1.0))
-            self.assertEqual(
-                backend.calls[-2:],
-                ["neutralize", "disconnect"],
-            )
+            self.assertIn("neutralize", backend.calls)
+            self.assertNotIn("disconnect", backend.calls)
+            self.assertTrue(service.gamepad_ready)
         finally:
             service.stop()
+        self.assertEqual(backend.calls[-1], "disconnect")
 
 
 if __name__ == "__main__":

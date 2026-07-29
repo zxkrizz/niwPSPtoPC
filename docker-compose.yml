@@ -1,8 +1,7 @@
 services:
   psp-build:
-    # Official PSPDEV CI image documented by the pspdev/pspdev maintainers.
-    # Use `docker compose pull` to refresh it deliberately.
-    image: pspdev/pspdev:latest
+    # Official PSPDEV image pinned to the v20260701 manifest digest.
+    image: pspdev/pspdev:v20260701@sha256:c9f1e60e8635d4df5ea246981b7473cbf48a9cf8457c1735f787821a684957f2
     working_dir: /workspace
     volumes:
       - .:/workspace

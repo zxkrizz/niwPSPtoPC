@@ -66,6 +66,10 @@ class InvalidPacketSizeError(PacketError):
     """The embedded packet_size field is inconsistent with the version."""
 
 
+class InvalidReservedFieldError(PacketError):
+    """A protocol field reserved for future use is not zero."""
+
+
 @dataclass(frozen=True, slots=True)
 class InputPacket:
     sequence: int
@@ -177,6 +181,10 @@ def decode_packet(data: bytes) -> InputPacket:
         ) = unpacked
         if session_token > PAIRING_TOKEN_MAX:
             raise PacketError("session token exceeds the 25-bit pairing range")
+    if reserved != 0:
+        raise InvalidReservedFieldError(
+            f"reserved field is {reserved}; expected zero"
+        )
 
     return InputPacket(
         sequence=sequence,
@@ -195,6 +203,8 @@ def encode_packet(packet: InputPacket) -> bytes:
         raise ValueError("version 2 packets require a session token")
     if not 0 <= packet.session_token <= PAIRING_TOKEN_MAX:
         raise ValueError("session token must be an unsigned 25-bit integer")
+    if packet.reserved != 0:
+        raise ValueError("reserved field must be zero")
     return PACKET_STRUCT.pack(
         INPUT_MAGIC,
         INPUT_VERSION,

@@ -70,6 +70,42 @@ void config_set_defaults(NiwPspToPcConfig *config)
     config->send_rate = (uint8_t)NIW_PSP_TO_PC_DEFAULT_SEND_RATE;
 }
 
+int config_resolve_path(
+    const char *eboot_path,
+    char *config_path,
+    size_t config_path_size)
+{
+    const char *separator;
+    size_t directory_length;
+    const char filename[] = "config.ini";
+
+    if (config_path == NULL || config_path_size == 0u) {
+        return -1;
+    }
+    if (eboot_path == NULL || *eboot_path == '\0') {
+        if (sizeof(filename) > config_path_size) {
+            return -1;
+        }
+        memcpy(config_path, filename, sizeof(filename));
+        return 0;
+    }
+
+    separator = strrchr(eboot_path, '/');
+    if (separator == NULL) {
+        separator = strrchr(eboot_path, '\\');
+    }
+    directory_length =
+        separator == NULL ? 0u : (size_t)(separator - eboot_path) + 1u;
+    if (directory_length + sizeof(filename) > config_path_size) {
+        return -1;
+    }
+    if (directory_length > 0u) {
+        memcpy(config_path, eboot_path, directory_length);
+    }
+    memcpy(config_path + directory_length, filename, sizeof(filename));
+    return 0;
+}
+
 int config_load(const char *path, NiwPspToPcConfig *config)
 {
     char line[160];
@@ -77,6 +113,9 @@ int config_load(const char *path, NiwPspToPcConfig *config)
     FILE *file = fopen(path, "r");
 
     if (file == NULL) {
+        if (errno == ENOENT) {
+            return NIW_PSP_TO_PC_CONFIG_NOT_FOUND;
+        }
         return CONFIG_ERROR_OPEN;
     }
 
@@ -135,7 +174,11 @@ int config_load(const char *path, NiwPspToPcConfig *config)
                 key_flag == CONFIG_KEY_SERVER_PORT
                     ? 65535u
                     : NIW_PSP_TO_PC_MAX_SEND_RATE;
-            if (parse_unsigned(value, 1u, maximum, &number) != 0) {
+            unsigned long minimum =
+                key_flag == CONFIG_KEY_SERVER_PORT
+                    ? 1u
+                    : NIW_PSP_TO_PC_MIN_SEND_RATE;
+            if (parse_unsigned(value, minimum, maximum, &number) != 0) {
                 fclose(file);
                 return CONFIG_ERROR_VALUE;
             }

@@ -33,7 +33,7 @@ $BuildEnvironment = Join-Path $ProjectRoot ".build-venv"
 $BuilderPython = Join-Path $BuildEnvironment "Scripts\python.exe"
 $EntryPoint = Join-Path $ProjectRoot "pc-server\niwpsptopc_gui.py"
 $Requirements = Join-Path $ProjectRoot "pc-server\requirements-build.txt"
-$VersionInfo = Join-Path $ProjectRoot "pc-server\windows-version-info.txt"
+$VersionInfo = Join-Path $ProjectRoot "build\windows-version-info.txt"
 $OutputDirectory = Join-Path $ProjectRoot "dist\windows"
 $WorkDirectory = Join-Path $ProjectRoot "build\pyinstaller"
 $Icon = Join-Path $ProjectRoot "build\niwPSPtoPC.ico"
@@ -90,6 +90,13 @@ if (-not (Test-Path -LiteralPath $VigemClient)) {
 & $BuilderPython (Join-Path $ProjectRoot "scripts\generate-windows-icon.py") $Icon
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to generate the Windows application icon."
+}
+
+& $BuilderPython `
+    (Join-Path $ProjectRoot "scripts\generate-windows-version-info.py") `
+    $VersionInfo
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to generate Windows version metadata."
 }
 
 $RunningExecutable = Get-Process -Name "niwPSPtoPC" -ErrorAction SilentlyContinue |

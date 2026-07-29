@@ -50,9 +50,10 @@ python -m pc_server --virtual-gamepad --pairing-token ABCDE
 ```
 
 Only FIRST, IN_ORDER and GAP states update the controller. DUPLICATE and
-OUT_OF_ORDER packets remain diagnostic events. After 1.5 seconds without a
-fresh accepted state, the backend releases all controls and disconnects the
-virtual device independently of the GUI.
+OUT_OF_ORDER packets remain diagnostic events. After 0.5 seconds without a
+fresh accepted state, the backend releases all controls. After 1.75 seconds it
+releases the PSP session while keeping the virtual XInput device connected
+independently of the GUI.
 
 ## Test tools
 
