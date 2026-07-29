@@ -24,8 +24,9 @@ LOGGER = logging.getLogger(__name__)
 UINT32_MASK = 0xFFFFFFFF
 UINT32_HALF_RANGE = 0x80000000
 MAX_CLOCK_SKEW_US = 5 * 60 * 1_000_000
-DEFAULT_ACTIVE_CLIENT_TIMEOUT_S = 1.5
+DEFAULT_ACTIVE_CLIENT_TIMEOUT_S = 1.75
 DEFAULT_CLIENT_RETENTION_S = 10.0
+PAIRING_ACK_INTERVAL_S = 0.1
 
 
 class SequenceEvent(Enum):
@@ -34,6 +35,19 @@ class SequenceEvent(Enum):
     GAP = "gap"
     DUPLICATE = "duplicate"
     OUT_OF_ORDER = "out-of-order"
+
+
+class ReceiverStage(Enum):
+    PORT_BOUND = "port-bound"
+    PACKET_RECEIVED = "packet-received"
+    CODE_MATCHED = "code-matched"
+    ACK_SENT = "ack-sent"
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiverEvent:
+    stage: ReceiverStage
+    address: tuple[str, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +159,7 @@ class UdpReceiver:
         on_packet: Callable[[ReceiverSnapshot], None] | None = None,
         on_diagnostic: Callable[[ReceiverSnapshot], None] | None = None,
         on_listening: Callable[[tuple[str, int]], None] | None = None,
+        on_stage: Callable[[ReceiverEvent], None] | None = None,
         allowed_hosts: set[str] | frozenset[str] | None = None,
         pairing_token: int | None = None,
         require_pairing: bool = False,
@@ -164,6 +179,7 @@ class UdpReceiver:
         self.on_packet = on_packet
         self.on_diagnostic = on_diagnostic
         self.on_listening = on_listening
+        self.on_stage = on_stage
         self.allowed_hosts = (
             frozenset(allowed_hosts) if allowed_hosts is not None else None
         )
@@ -179,6 +195,7 @@ class UdpReceiver:
         self._blocked_clients: set[tuple[str, int]] = set()
         self._rejected_hosts: set[str] = set()
         self._rejected_pairings: set[tuple[str, int | None]] = set()
+        self._last_ack_sent: dict[tuple[str, int], float] = {}
         self._clients_lock = threading.RLock()
         self._stop_event = threading.Event()
 
@@ -207,6 +224,7 @@ class UdpReceiver:
             self._active_client = None
             self._blocked_clients.clear()
             self._rejected_pairings.clear()
+            self._last_ack_sent.clear()
 
     def disconnect_active_client(self) -> tuple[str, int] | None:
         """Release and temporarily block the current client for device change."""
@@ -236,6 +254,10 @@ class UdpReceiver:
                     self.on_listening(
                         (listening_address[0], listening_address[1])
                     )
+                self._emit_stage(
+                    ReceiverStage.PORT_BOUND,
+                    (listening_address[0], listening_address[1]),
+                )
 
                 while not self._stop_event.is_set():
                     try:
@@ -244,6 +266,7 @@ class UdpReceiver:
                         self._maintain_clients(time.monotonic())
                         continue
 
+                    self._emit_stage(ReceiverStage.PACKET_RECEIVED, address)
                     try:
                         packet = decode_packet(data)
                     except PacketError as exc:
@@ -272,12 +295,24 @@ class UdpReceiver:
                         continue
 
                     snapshot = self._handle_packet(packet, address)
+                    token_matches = (
+                        self._pairing_token is not None
+                        and packet.session_token == self._pairing_token
+                    )
+                    if snapshot is not None and token_matches:
+                        self._emit_stage(ReceiverStage.CODE_MATCHED, address)
                     if (
                         snapshot is not None
                         and snapshot.is_active_client
-                        and self._pairing_token is not None
-                        and packet.session_token == self._pairing_token
+                        and token_matches
                     ):
+                        now = time.monotonic()
+                        last_ack = self._last_ack_sent.get(address)
+                        if (
+                            last_ack is not None
+                            and now - last_ack < PAIRING_ACK_INTERVAL_S
+                        ):
+                            continue
                         try:
                             sock.sendto(
                                 encode_pairing_ack(self._pairing_token),
@@ -290,6 +325,9 @@ class UdpReceiver:
                                 address[1],
                                 exc,
                             )
+                        else:
+                            self._last_ack_sent[address] = now
+                            self._emit_stage(ReceiverStage.ACK_SENT, address)
         finally:
             if self.display is not None:
                 self.display.finish()
@@ -442,3 +480,16 @@ class UdpReceiver:
         for address in expired:
             del self._clients[address]
             self._blocked_clients.discard(address)
+            self._last_ack_sent.pop(address, None)
+
+    def _emit_stage(
+        self,
+        stage: ReceiverStage,
+        address: tuple[str, int] | None = None,
+    ) -> None:
+        if self.on_stage is None:
+            return
+        try:
+            self.on_stage(ReceiverEvent(stage, address))
+        except Exception:
+            LOGGER.exception("Receiver stage callback failed")

@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    name: Validate release source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Match tag to source version
+        run: |
+          SOURCE_VERSION=$(python -c "import sys; sys.path.insert(0, 'pc-server'); from pc_server import __version__; print(__version__)")
+          test "$GITHUB_REF_NAME" = "v$SOURCE_VERSION"
+      - name: Run Python and host C tests
+        run: |
+          cd pc-server
+          python -m compileall -q pc_server
+          python -m unittest discover -s tests -v
+          cd ..
+          sh ./scripts/test-c-protocol.sh
+
+  psp:
+    name: Build PSP package
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build with pinned PSPDEV
+        run: |
+          PSPDEV_IMAGE=$(cat scripts/pspdev-image.txt)
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            "$PSPDEV_IMAGE" \
+            bash ./scripts/build-psp.sh
+      - name: Stage PSP artifact
+        run: |
+          mkdir -p dist/niwPSPtoPC
+          cp psp-client/EBOOT.PBP psp-client/config.ini dist/niwPSPtoPC/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-psp
+          path: dist/niwPSPtoPC
+          if-no-files-found: error
+
+  windows:
+    name: Build Windows package
+    needs: validate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Build standalone Windows application
+        shell: pwsh
+        run: ./scripts/build-windows.ps1 -Python (Get-Command python).Source
+      - name: Smoke-test and verify package
+        shell: pwsh
+        run: |
+          $process = Start-Process `
+            -FilePath "./dist/windows/niwPSPtoPC.exe" `
+            -ArgumentList "--smoke-test" `
+            -WindowStyle Hidden `
+            -PassThru `
+            -Wait
+          if ($process.ExitCode -ne 0) {
+            throw "GUI smoke test failed with exit code $($process.ExitCode)"
+          }
+          ./scripts/verify-windows-package.ps1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-windows
+          path: dist/windows/niwPSPtoPC.exe
+          if-no-files-found: error
+
+  publish:
+    name: Package and publish GitHub Release
+    needs: [psp, windows]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-windows
+          path: dist/windows
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-psp
+          path: psp-client
+      - name: Package verified archives
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          ./scripts/package-release.ps1 -Version $version -SkipBuild
+      - name: Publish tag release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = Get-ChildItem ./dist/release -File |
+            ForEach-Object { $_.FullName }
+          gh release create $env:GITHUB_REF_NAME @assets `
+            --verify-tag `
+            --generate-notes `
+            --title "niwPSPtoPC $env:GITHUB_REF_NAME"

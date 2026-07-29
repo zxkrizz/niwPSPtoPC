@@ -30,6 +30,7 @@ Struct notation: `!IHHIIBBHIQ`.
 `session_token` is in `0x00000000–0x01FFFFFF`. Its five-character text form
 uses `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`, omitting visually ambiguous
 characters. Spaces and hyphens entered in the desktop app are ignored.
+Receivers reject a packet whose `reserved` field is not zero.
 
 ## Pairing ACK
 
@@ -47,7 +48,8 @@ Struct notation: `!IHHI`.
 
 The PSP generates a new token on each application start. Until a valid ACK is
 received, it reports a waiting state. ACKs are refreshed while input is being
-received; after two seconds without one, the PSP returns to discovery mode.
+received, at no more than 10 Hz; after two seconds without one, the PSP returns
+to discovery mode.
 
 ## Automatic PC discovery
 
@@ -107,11 +109,14 @@ released or times out. Inactive client entries expire.
 
 ## Controller safety timeout
 
-After 1.5 seconds without a fresh accepted state, the controller backend:
+After 0.5 seconds without a fresh accepted state, the controller backend:
 
 1. releases every button;
 2. centers the analog stick;
-3. disconnects the virtual device.
+3. keeps the virtual XInput device connected.
+
+After 1.75 seconds, the receiver releases the active PSP session. The virtual
+device is removed only at application shutdown or an explicit backend change.
 
 This watchdog belongs to the controller layer and does not depend on GUI
 refreshing.

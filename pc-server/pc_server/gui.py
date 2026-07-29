@@ -10,10 +10,17 @@ import tkinter as tk
 from tkinter import ttk
 
 from . import __version__
+from .connection_doctor import ConnectionDoctor, DoctorStage
 from .gamepad import ControllerEvent, ControllerEventType, ControllerService
 from .gui_settings import APP_NAME, load_settings
 from .protocol import Buttons, InputPacket, format_pairing_token, parse_pairing_token
-from .receiver import ReceiverSnapshot, UdpReceiver
+from .receiver import (
+    ReceiverEvent,
+    ReceiverSnapshot,
+    ReceiverStage,
+    UdpReceiver,
+)
+from .single_instance import SingleInstance
 
 
 COLOR_BG = "#061014"
@@ -85,7 +92,7 @@ class PixelPspView(tk.Canvas):
         self.create_text(
             24,
             22,
-            text="LIVE INPUT // PSP-2000",
+            text="LIVE INPUT // PSP",
             anchor="w",
             fill=COLOR_MUTED,
             font=(PIXEL_FONT, 9, "bold"),
@@ -98,10 +105,10 @@ class PixelPspView(tk.Canvas):
             fill=COLOR_ACCENT_DARK,
             outline="",
         )
-        self.create_text(
+        self._rate_text = self.create_text(
             510,
             23,
-            text="60 FPS INPUT",
+            text="-- HZ INPUT",
             fill=COLOR_ACCENT,
             font=(PIXEL_FONT, 7, "bold"),
         )
@@ -516,15 +523,29 @@ class PixelPspView(tk.Canvas):
             )
         )
 
+    def set_input_rate(self, packets_per_second: float) -> None:
+        rate = max(0, round(packets_per_second))
+        self.itemconfigure(self._rate_text, text=f"{rate:02d} HZ INPUT")
+
 
 class NiwPspToPcApp:
     def __init__(self, root: tk.Tk, *, auto_start: bool = True) -> None:
         self.root = root
         self.root.title(f"{APP_NAME} — PSP Wi-Fi Controller")
-        self.root.geometry("1120x700")
-        self.root.minsize(1040, 660)
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        width = min(1120, max(720, screen_width - 80))
+        height = min(700, max(520, screen_height - 80))
+        self.root.geometry(f"{width}x{height}")
+        self.root.minsize(
+            min(900, max(640, screen_width - 120)),
+            min(560, max(480, screen_height - 120)),
+        )
         self.root.configure(bg=COLOR_BG)
 
+        self._settings = load_settings()
+        self._doctor = ConnectionDoctor()
+        self._doctor_port = self._settings.port
         self._messages: queue.Queue[tuple[str, object | None]] = queue.Queue()
         self._receiver: UdpReceiver | None = None
         self._receiver_thread: threading.Thread | None = None
@@ -533,6 +554,9 @@ class NiwPspToPcApp:
         self._closing = False
         self._paired_address: tuple[str, int] | None = None
         self._active_token: int | None = None
+        self._doctor_row_labels: list[tk.Label] = []
+        self._compact_layout = False
+        self._short_layout = False
 
         self.code_var = tk.StringVar()
         self.status_var = tk.StringVar(value="BOOTING RECEIVER…")
@@ -543,6 +567,7 @@ class NiwPspToPcApp:
 
         self._configure_styles()
         self._build_ui()
+        self.root.bind("<Configure>", self._on_window_resize)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.after(50, self._poll_messages)
         if auto_start:
@@ -560,47 +585,108 @@ class NiwPspToPcApp:
         shell.pack(fill="both", expand=True, padx=30, pady=24)
         self._build_header(shell)
 
-        content = tk.Frame(shell, bg=COLOR_BG)
-        content.pack(fill="both", expand=True, pady=(20, 0))
-        content.grid_columnconfigure(0, weight=5)
-        content.grid_columnconfigure(1, weight=3)
-        content.grid_rowconfigure(0, weight=1)
+        self._content = tk.Frame(shell, bg=COLOR_BG)
+        self._content.pack(fill="both", expand=True, pady=(20, 0))
+        self._content.grid_columnconfigure(0, weight=5)
+        self._content.grid_columnconfigure(1, weight=3)
+        self._content.grid_rowconfigure(0, weight=1)
 
-        visual = tk.Frame(
-            content,
+        self._visual_panel = tk.Frame(
+            self._content,
             bg=COLOR_PANEL,
             highlightbackground=COLOR_BORDER,
             highlightthickness=2,
         )
-        visual.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        self.controller_view = PixelPspView(visual)
+        self._visual_panel.grid(
+            row=0,
+            column=0,
+            sticky="nsew",
+            padx=(0, 10),
+        )
+        self.controller_view = PixelPspView(self._visual_panel)
         self.controller_view.pack(expand=True, padx=8, pady=8)
 
-        pairing = tk.Frame(
-            content,
+        self._pairing_panel = tk.Frame(
+            self._content,
             bg=COLOR_PANEL,
             highlightbackground=COLOR_BORDER,
             highlightthickness=2,
         )
-        pairing.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
-        self._build_pairing_card(pairing)
+        self._pairing_panel.grid(
+            row=0,
+            column=1,
+            sticky="nsew",
+            padx=(10, 0),
+        )
+        self._build_pairing_card(self._pairing_panel)
 
-        footer = tk.Frame(shell, bg=COLOR_BG)
-        footer.pack(fill="x", pady=(12, 0))
+        self._footer = tk.Frame(shell, bg=COLOR_BG)
+        self._footer.pack(fill="x", pady=(12, 0))
         tk.Label(
-            footer,
-            text="PSP-2000  //  ONE ANALOG  //  XINPUT",
+            self._footer,
+            text="PSP 1000-GO  //  ONE ANALOG  //  XINPUT",
             bg=COLOR_BG,
             fg=COLOR_MUTED,
             font=(PIXEL_FONT, 8, "bold"),
         ).pack(side="left")
         tk.Label(
-            footer,
+            self._footer,
             text="HOME NETWORK TOOL",
             bg=COLOR_BG,
             fg=COLOR_BORDER,
             font=(PIXEL_FONT, 8, "bold"),
         ).pack(side="right")
+
+    def _on_window_resize(self, event: tk.Event[tk.Misc]) -> None:
+        if event.widget is not self.root:
+            return
+        compact = event.width < 1000
+        if compact != self._compact_layout:
+            self._compact_layout = compact
+            if compact:
+                self._visual_panel.grid_remove()
+                self._pairing_panel.grid_configure(
+                    column=0,
+                    columnspan=2,
+                    padx=0,
+                )
+            else:
+                self._visual_panel.grid()
+                self._pairing_panel.grid_configure(
+                    column=1,
+                    columnspan=1,
+                    padx=(10, 0),
+                )
+        short = event.height < 620
+        if short == self._short_layout:
+            return
+        self._short_layout = short
+        if short:
+            self._link_status_caption.pack_forget()
+            self._pair_section_label.pack_forget()
+            self._pair_help_label.pack_forget()
+            self._gamepad_panel.pack_forget()
+            self._footer.pack_forget()
+        else:
+            self._link_status_caption.pack(
+                anchor="w",
+                before=self._status_row,
+            )
+            self._pair_section_label.pack(
+                anchor="w",
+                before=self.code_entry,
+            )
+            self._pair_help_label.pack(
+                anchor="w",
+                pady=(6, 11),
+                before=self.code_entry,
+            )
+            self._gamepad_panel.pack(
+                fill="x",
+                side="bottom",
+                pady=(5, 0),
+            )
+            self._footer.pack(fill="x", pady=(12, 0))
 
     def _build_header(self, master: tk.Misc) -> None:
         header = tk.Frame(master, bg=COLOR_BG)
@@ -660,20 +746,21 @@ class NiwPspToPcApp:
 
     def _build_pairing_card(self, master: tk.Misc) -> None:
         body = tk.Frame(master, bg=COLOR_PANEL)
-        body.pack(fill="both", expand=True, padx=24, pady=22)
+        body.pack(fill="both", expand=True, padx=24, pady=16)
 
-        tk.Label(
+        self._link_status_caption = tk.Label(
             body,
             text="LINK STATUS",
             bg=COLOR_PANEL,
             fg=COLOR_MUTED,
             font=(PIXEL_FONT, 8, "bold"),
-        ).pack(anchor="w")
+        )
+        self._link_status_caption.pack(anchor="w")
 
-        status_row = tk.Frame(body, bg=COLOR_PANEL_LIGHT)
-        status_row.pack(fill="x", pady=(9, 0))
+        self._status_row = tk.Frame(body, bg=COLOR_PANEL_LIGHT)
+        self._status_row.pack(fill="x", pady=(9, 0))
         self.status_dot = tk.Canvas(
-            status_row,
+            self._status_row,
             width=26,
             height=50,
             bg=COLOR_PANEL_LIGHT,
@@ -688,7 +775,7 @@ class NiwPspToPcApp:
             fill=COLOR_WARN,
             outline="",
         )
-        status_text = tk.Frame(status_row, bg=COLOR_PANEL_LIGHT)
+        status_text = tk.Frame(self._status_row, bg=COLOR_PANEL_LIGHT)
         status_text.pack(side="left", fill="x", expand=True, padx=(4, 8))
         tk.Label(
             status_text,
@@ -707,22 +794,24 @@ class NiwPspToPcApp:
             font=("Segoe UI", 9),
         ).pack(anchor="w", pady=(3, 0))
 
-        tk.Frame(body, bg=COLOR_BORDER, height=2).pack(fill="x", pady=20)
+        tk.Frame(body, bg=COLOR_BORDER, height=2).pack(fill="x", pady=12)
 
-        tk.Label(
+        self._pair_section_label = tk.Label(
             body,
             text="01 // PAIR DEVICE",
             bg=COLOR_PANEL,
             fg=COLOR_ACCENT,
             font=(PIXEL_FONT, 9, "bold"),
-        ).pack(anchor="w")
-        tk.Label(
+        )
+        self._pair_section_label.pack(anchor="w")
+        self._pair_help_label = tk.Label(
             body,
             text="Enter the code displayed on the PSP.",
             bg=COLOR_PANEL,
             fg=COLOR_TEXT,
             font=("Segoe UI", 10),
-        ).pack(anchor="w", pady=(6, 11))
+        )
+        self._pair_help_label.pack(anchor="w", pady=(6, 11))
 
         validate = (self.root.register(self._validate_code_entry), "%P")
         self.code_entry = tk.Entry(
@@ -743,7 +832,7 @@ class NiwPspToPcApp:
             validate="key",
             validatecommand=validate,
         )
-        self.code_entry.pack(fill="x", ipady=9)
+        self.code_entry.pack(fill="x", ipady=6)
         self.code_entry.bind("<Return>", lambda _event: self.authorize())
 
         self.pair_button = tk.Button(
@@ -757,11 +846,11 @@ class NiwPspToPcApp:
             relief="flat",
             bd=0,
             padx=18,
-            pady=12,
+            pady=9,
             cursor="hand2",
             font=(PIXEL_FONT, 9, "bold"),
         )
-        self.pair_button.pack(fill="x", pady=(11, 0))
+        self.pair_button.pack(fill="x", pady=(8, 0))
 
         self.change_button = tk.Button(
             body,
@@ -774,28 +863,66 @@ class NiwPspToPcApp:
             relief="flat",
             bd=0,
             padx=18,
-            pady=9,
+            pady=7,
             cursor="hand2",
             font=(PIXEL_FONT, 8, "bold"),
         )
-        self.change_button.pack(fill="x", pady=(8, 0))
+        self.change_button.pack(fill="x", pady=(6, 0))
 
-        gamepad = tk.Frame(
+        doctor = tk.Frame(body, bg=COLOR_PANEL)
+        doctor.pack(fill="x", pady=(8, 5))
+        doctor.grid_columnconfigure(0, weight=1)
+        doctor.grid_columnconfigure(1, weight=1)
+        tk.Label(
+            doctor,
+            text="CONNECTION DOCTOR",
+            bg=COLOR_PANEL,
+            fg=COLOR_BLUE,
+            font=(PIXEL_FONT, 8, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        for index, (stage, complete) in enumerate(self._doctor.rows()):
+            label = tk.Label(
+                doctor,
+                text=f"[{'OK' if complete else '--'}] {stage}",
+                bg=COLOR_PANEL,
+                fg=COLOR_MUTED,
+                font=(PIXEL_FONT, 7, "bold"),
+            )
+            label.grid(
+                row=1 + index // 2,
+                column=index % 2,
+                sticky="w",
+                pady=(2, 0),
+            )
+            self._doctor_row_labels.append(label)
+        self.doctor_detail_var = tk.StringVar()
+        tk.Label(
+            doctor,
+            textvariable=self.doctor_detail_var,
+            bg=COLOR_PANEL,
+            fg=COLOR_MUTED,
+            justify="left",
+            wraplength=350,
+            font=("Segoe UI", 7),
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self._refresh_doctor()
+
+        self._gamepad_panel = tk.Frame(
             body,
             bg=COLOR_SCREEN,
             highlightbackground=COLOR_BORDER,
             highlightthickness=1,
         )
-        gamepad.pack(fill="x", side="bottom", pady=(20, 0))
+        self._gamepad_panel.pack(fill="x", side="bottom", pady=(5, 0))
         tk.Label(
-            gamepad,
+            self._gamepad_panel,
             text="VIRTUAL PAD",
             bg=COLOR_SCREEN,
             fg=COLOR_MUTED,
             font=(PIXEL_FONT, 8, "bold"),
         ).pack(side="left", padx=12, pady=11)
         tk.Label(
-            gamepad,
+            self._gamepad_panel,
             textvariable=self.gamepad_var,
             bg=COLOR_SCREEN,
             fg=COLOR_ACCENT,
@@ -824,10 +951,26 @@ class NiwPspToPcApp:
         self.status_detail_var.set(detail)
         self.status_dot.itemconfigure(self.status_dot_item, fill=color)
 
+    def _refresh_doctor(self) -> None:
+        rows = self._doctor.rows()
+        for label, (stage, complete) in zip(
+            getattr(self, "_doctor_row_labels", []),
+            rows,
+        ):
+            label.configure(
+                text=f"[{'OK' if complete else '--'}] {stage}",
+                fg=COLOR_ACCENT if complete else COLOR_MUTED,
+            )
+        if hasattr(self, "doctor_detail_var"):
+            self.doctor_detail_var.set(
+                self._doctor.guidance(port=self._doctor_port)
+            )
+
     def start_receiver(self) -> None:
         if self._running or self._closing:
             return
-        settings = load_settings()
+        settings = self._settings
+        self._doctor_port = settings.port
         self._running = True
         self._controller_service = ControllerService(
             on_event=lambda event: self._messages.put(("controller", event))
@@ -843,9 +986,12 @@ class NiwPspToPcApp:
             settings.port,
             on_packet=apply_controller_state,
             on_listening=lambda address: self._messages.put(("listening", address)),
+            on_stage=lambda event: self._messages.put(("stage", event)),
+            allowed_hosts=set(settings.allowed_hosts) or None,
             pairing_token=self._active_token,
             require_pairing=True,
         )
+        self._controller_service.ensure_backend()
 
         def worker() -> None:
             try:
@@ -874,9 +1020,16 @@ class NiwPspToPcApp:
             return
 
         self._active_token = token
+        self._doctor.reset_pairing()
+        self._refresh_doctor()
         self.code_var.set(format_pairing_token(token))
         self._paired_address = None
-        self.gamepad_var.set("OFFLINE")
+        self.gamepad_var.set(
+            "READY"
+            if self._controller_service is not None
+            and getattr(self._controller_service, "gamepad_ready", False)
+            else "OFFLINE"
+        )
         self.controller_view.neutralize()
         self.controller_view.set_link_state("SEARCHING PSP", "CODE ACCEPTED")
         if self._controller_service is not None:
@@ -891,9 +1044,16 @@ class NiwPspToPcApp:
 
     def clear_pairing(self) -> None:
         self._active_token = None
+        self._doctor.reset_pairing()
+        self._refresh_doctor()
         self._paired_address = None
         self.code_var.set("")
-        self.gamepad_var.set("OFFLINE")
+        self.gamepad_var.set(
+            "READY"
+            if self._controller_service is not None
+            and getattr(self._controller_service, "gamepad_ready", False)
+            else "OFFLINE"
+        )
         self.controller_view.neutralize()
         self.controller_view.set_link_state("PAIRING MODE", "ENTER CODE ON PC")
         if self._controller_service is not None:
@@ -918,6 +1078,8 @@ class NiwPspToPcApp:
                         COLOR_BLUE,
                     )
                     self.code_entry.focus_set()
+                elif kind == "stage":
+                    self._apply_receiver_stage(payload)  # type: ignore[arg-type]
                 elif kind == "packet":
                     self._apply_snapshot(payload)  # type: ignore[arg-type]
                 elif kind == "controller":
@@ -940,6 +1102,7 @@ class NiwPspToPcApp:
     def _apply_snapshot(self, snapshot: ReceiverSnapshot) -> None:
         self._paired_address = snapshot.address
         self.controller_view.set_packet(snapshot.packet)
+        self.controller_view.set_input_rate(snapshot.packets_per_second)
         self.controller_view.set_link_state("LINK ACTIVE", "CONTROLLER READY")
         self._set_status(
             "PSP CONNECTED",
@@ -948,12 +1111,33 @@ class NiwPspToPcApp:
         )
 
     def _apply_controller_event(self, event: ControllerEvent) -> None:
-        if event.event is ControllerEventType.CONNECTED:
+        if event.event is ControllerEventType.GAMEPAD_READY:
+            self._doctor.mark(DoctorStage.GAMEPAD_CREATED)
+            self._refresh_doctor()
             self.gamepad_var.set("READY")
             return
-        self.gamepad_var.set("OFFLINE")
+        if event.event is ControllerEventType.CONNECTED:
+            self.gamepad_var.set("ACTIVE")
+            return
+        if event.event is ControllerEventType.NEUTRALIZED:
+            self.gamepad_var.set("READY")
+            self.controller_view.neutralize()
+            if self._running:
+                self.controller_view.set_link_state(
+                    "INPUT PAUSED",
+                    "CONTROLS RELEASED",
+                )
+                self._set_status(
+                    "SIGNAL PAUSED",
+                    "Input is neutral; the PSP session remains reserved briefly.",
+                    COLOR_WARN,
+                )
+            return
         self.controller_view.neutralize()
         if event.event is ControllerEventType.ERROR:
+            self.gamepad_var.set("OFFLINE")
+            self._doctor.fail_gamepad(event.error or "ViGEmBus unavailable")
+            self._refresh_doctor()
             self.controller_view.set_link_state("DRIVER ERROR", "INSTALL VIGEMBUS")
             self._set_status(
                 "GAMEPAD DRIVER MISSING",
@@ -961,12 +1145,28 @@ class NiwPspToPcApp:
                 COLOR_DANGER,
             )
         elif event.reason == "timeout" and self._running:
+            self.gamepad_var.set(
+                "READY"
+                if self._controller_service is not None
+                and getattr(self._controller_service, "gamepad_ready", False)
+                else "OFFLINE"
+            )
             self.controller_view.set_link_state("SIGNAL LOST", "WAITING FOR PSP")
             self._set_status(
                 "CONNECTION LOST",
                 "All controls were released. Waiting for the PSP.",
                 COLOR_WARN,
             )
+
+    def _apply_receiver_stage(self, event: ReceiverEvent) -> None:
+        mapping = {
+            ReceiverStage.PORT_BOUND: DoctorStage.PORT_BOUND,
+            ReceiverStage.PACKET_RECEIVED: DoctorStage.PACKET_RECEIVED,
+            ReceiverStage.CODE_MATCHED: DoctorStage.CODE_MATCHED,
+            ReceiverStage.ACK_SENT: DoctorStage.ACK_SENT,
+        }
+        self._doctor.mark(mapping[event.stage])
+        self._refresh_doctor()
 
     def close(self) -> None:
         self._closing = True
@@ -978,20 +1178,24 @@ class NiwPspToPcApp:
 
 
 def main() -> int:
-    root = tk.Tk()
     smoke_test = (
         "--smoke-test" in sys.argv[1:]
         or os.environ.get("NIWPSPTOPC_SMOKE_TEST") == "1"
     )
-    if smoke_test:
-        root.withdraw()
-    NiwPspToPcApp(root, auto_start=not smoke_test)
-    if smoke_test:
-        root.update_idletasks()
-        root.destroy()
+    with SingleInstance("Local\\niwPSPtoPC.GUI.v1") as instance:
+        if not instance.acquired:
+            instance.show_already_running_message()
+            return 2
+        root = tk.Tk()
+        if smoke_test:
+            root.withdraw()
+        NiwPspToPcApp(root, auto_start=not smoke_test)
+        if smoke_test:
+            root.update_idletasks()
+            root.destroy()
+            return 0
+        root.mainloop()
         return 0
-    root.mainloop()
-    return 0
 
 
 if __name__ == "__main__":

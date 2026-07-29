@@ -44,7 +44,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--input-timeout",
         type=float,
         default=DEFAULT_INPUT_TIMEOUT_S,
-        help="seconds without fresh input before neutral/disconnect (default: 1.5)",
+        help=(
+            "seconds without fresh input before releasing the PSP session "
+            "(default: 1.75; controls neutralize earlier)"
+        ),
     )
     parser.add_argument(
         "--allow-client",

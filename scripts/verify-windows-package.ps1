@@ -31,9 +31,20 @@ if (
     throw "The Windows executable does not contain the x64 ViGEm client."
 }
 
-$Version = (Get-Item -LiteralPath $Executable).VersionInfo.ProductVersion
-if ($Version -ne "1.0.0") {
-    throw "Unexpected Windows product version: $Version"
+$VersionSource = Join-Path $ProjectRoot "pc-server\pc_server\_version.py"
+$VersionMatch = Select-String `
+    -LiteralPath $VersionSource `
+    -Pattern '^__version__ = "([0-9]+\.[0-9]+\.[0-9]+)"$'
+if (-not $VersionMatch) {
+    throw "Could not read the source product version."
+}
+$ExpectedVersion = $VersionMatch.Matches[0].Groups[1].Value
+$ProductVersion = (Get-Item -LiteralPath $Executable).VersionInfo.ProductVersion
+if ($ProductVersion -ne $ExpectedVersion) {
+    throw (
+        "Windows product version $ProductVersion does not match " +
+        "$ExpectedVersion."
+    )
 }
 
 Write-Output "Windows package verification passed."

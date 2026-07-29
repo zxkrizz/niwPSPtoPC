@@ -18,7 +18,10 @@ from .protocol import Buttons, InputPacket
 from .receiver import ReceiverSnapshot, SequenceEvent
 
 LOGGER = logging.getLogger(__name__)
-DEFAULT_INPUT_TIMEOUT_S = 1.5
+DEFAULT_NEUTRAL_TIMEOUT_S = 0.5
+DEFAULT_SESSION_TIMEOUT_S = 1.75
+# Kept as the public CLI default name for compatibility.
+DEFAULT_INPUT_TIMEOUT_S = DEFAULT_SESSION_TIMEOUT_S
 
 
 class XInputButtons(IntFlag):
@@ -165,7 +168,9 @@ class VGamepadBackend:
 
 
 class ControllerEventType(Enum):
+    GAMEPAD_READY = "gamepad-ready"
     CONNECTED = "connected"
+    NEUTRALIZED = "neutralized"
     DISCONNECTED = "disconnected"
     ERROR = "error"
 
@@ -192,19 +197,31 @@ class ControllerService:
         backend_factory: Callable[[], GamepadBackend] = VGamepadBackend,
         *,
         timeout_s: float = DEFAULT_INPUT_TIMEOUT_S,
+        neutral_timeout_s: float | None = None,
         on_event: Callable[[ControllerEvent], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
         start_watchdog: bool = True,
     ) -> None:
         if timeout_s <= 0:
             raise ValueError("timeout_s must be positive")
+        if neutral_timeout_s is None:
+            neutral_timeout_s = min(
+                DEFAULT_NEUTRAL_TIMEOUT_S,
+                timeout_s / 3,
+            )
+        if neutral_timeout_s <= 0 or neutral_timeout_s >= timeout_s:
+            raise ValueError(
+                "neutral_timeout_s must be positive and shorter than timeout_s"
+            )
         self._backend_factory = backend_factory
         self._timeout_s = timeout_s
+        self._neutral_timeout_s = neutral_timeout_s
         self._on_event = on_event
         self._clock = clock
         self._backend: GamepadBackend | None = None
         self._address: tuple[str, int] | None = None
         self._last_update_at: float | None = None
+        self._neutralized_for_silence = False
         self._connected = False
         self._backend_failed = False
         self._stopped = False
@@ -229,6 +246,38 @@ class ControllerService:
         with self._lock:
             return self._address
 
+    @property
+    def gamepad_ready(self) -> bool:
+        with self._lock:
+            return self._backend is not None and not self._backend_failed
+
+    def ensure_backend(self) -> bool:
+        """Create the virtual target early and keep it for the process lifetime."""
+        event: ControllerEvent | None = None
+        with self._lock:
+            if self._stopped or self._backend_failed:
+                return False
+            if self._backend is not None:
+                return True
+            try:
+                self._backend = self._backend_factory()
+                self._backend.connect()
+                self._backend.neutralize()
+            except Exception as exc:
+                LOGGER.exception("Virtual gamepad preflight failed")
+                self._destroy_backend_locked("backend-error")
+                self._backend_failed = True
+                event = ControllerEvent(
+                    ControllerEventType.ERROR,
+                    reason="backend-error",
+                    error=str(exc),
+                )
+            else:
+                event = ControllerEvent(ControllerEventType.GAMEPAD_READY)
+        if event is not None:
+            self._emit(event)
+        return event is not None and event.event is ControllerEventType.GAMEPAD_READY
+
     def handle_snapshot(self, snapshot: ReceiverSnapshot) -> bool:
         """Apply an actionable snapshot; reject diagnostics defensively."""
         if (
@@ -242,7 +291,7 @@ class ControllerService:
             if self._stopped or self._backend_failed:
                 return False
             if self._connected and self._address != snapshot.address:
-                self._disconnect_locked("client-changed")
+                self._release_session_locked("client-changed")
 
             try:
                 if self._backend is None:
@@ -251,7 +300,7 @@ class ControllerService:
                 self._backend.apply(map_packet_to_xbox360(snapshot.packet))
             except Exception as exc:
                 LOGGER.exception("Virtual gamepad update failed")
-                self._disconnect_locked("backend-error")
+                self._destroy_backend_locked("backend-error")
                 self._backend_failed = True
                 event = ControllerEvent(
                     ControllerEventType.ERROR,
@@ -264,6 +313,7 @@ class ControllerService:
                 self._connected = True
                 self._address = snapshot.address
                 self._last_update_at = self._clock()
+                self._neutralized_for_silence = False
                 if not was_connected:
                     event = ControllerEvent(
                         ControllerEventType.CONNECTED,
@@ -274,30 +324,50 @@ class ControllerService:
         return event is None or event.event is ControllerEventType.CONNECTED
 
     def check_timeout(self, now: float | None = None) -> bool:
-        """Neutralize and disconnect when no accepted state arrived in time."""
-        event: ControllerEvent | None = None
+        """Neutralize stale input, then release only the PSP session lock."""
+        events: list[ControllerEvent] = []
         with self._lock:
             if not self._connected or self._last_update_at is None:
                 return False
             checked_at = self._clock() if now is None else now
-            if checked_at - self._last_update_at < self._timeout_s:
+            silence_s = checked_at - self._last_update_at
+            if silence_s < self._neutral_timeout_s:
                 return False
-            address = self._address
-            self._disconnect_locked("timeout")
-            event = ControllerEvent(
-                ControllerEventType.DISCONNECTED,
-                address=address,
-                reason="timeout",
-            )
-        self._emit(event)
-        return True
+            if not self._neutralized_for_silence:
+                if self._backend is not None:
+                    try:
+                        self._backend.neutralize()
+                    except Exception:
+                        LOGGER.exception("Failed to neutralize stale controller input")
+                self._neutralized_for_silence = True
+                events.append(
+                    ControllerEvent(
+                        ControllerEventType.NEUTRALIZED,
+                        address=self._address,
+                        reason="input-silence",
+                    )
+                )
+            released = silence_s >= self._timeout_s
+            if released:
+                address = self._address
+                self._release_session_locked("timeout", neutralize=False)
+                events.append(
+                    ControllerEvent(
+                        ControllerEventType.DISCONNECTED,
+                        address=address,
+                        reason="timeout",
+                    )
+                )
+        for event in events:
+            self._emit(event)
+        return released
 
     def disconnect(self, reason: str = "manual") -> None:
         event: ControllerEvent | None = None
         with self._lock:
             address = self._address
-            had_connection = self._connected or self._backend is not None
-            self._disconnect_locked(reason)
+            had_connection = self._connected
+            self._release_session_locked(reason)
             if reason != "backend-error":
                 self._backend_failed = False
             if had_connection:
@@ -316,23 +386,42 @@ class ControllerService:
             self._stopped = True
         self._stop_event.set()
         self.disconnect("receiver-stopped")
+        with self._lock:
+            self._destroy_backend_locked("application-stopped")
         thread = self._watchdog_thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=1.0)
 
-    def _disconnect_locked(self, reason: str) -> None:
-        backend = self._backend
-        self._backend = None
+    def _release_session_locked(
+        self,
+        reason: str,
+        *,
+        neutralize: bool = True,
+    ) -> None:
         self._connected = False
         self._address = None
         self._last_update_at = None
+        self._neutralized_for_silence = False
+        if neutralize and self._backend is not None:
+            try:
+                self._backend.neutralize()
+            except Exception:
+                LOGGER.exception(
+                    "Failed to send neutral state while releasing session (%s)",
+                    reason,
+                )
+
+    def _destroy_backend_locked(self, reason: str) -> None:
+        backend = self._backend
+        self._backend = None
+        self._release_session_locked(reason, neutralize=False)
         if backend is None:
             return
         try:
             backend.neutralize()
         except Exception:
             LOGGER.exception(
-                "Failed to send neutral state while disconnecting (%s)", reason
+                "Failed to send neutral state while removing gamepad (%s)", reason
             )
         try:
             backend.disconnect()

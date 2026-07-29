@@ -23,7 +23,6 @@
 #define APP_NAME "niwPSPtoPC"
 #define MAX_NETWORK_PROFILES 16
 #define CONNECTION_TIMEOUT_US (30ULL * 1000ULL * 1000ULL)
-#define DISPLAY_PERIOD_US 100000ULL
 #define PAIRING_ACK_TIMEOUT_US 2000000ULL
 #define PAIRING_ALPHABET "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 #define DISCOVERY_IPV4 "255.255.255.255"
@@ -359,9 +358,10 @@ static void reset_pc_discovery(struct sockaddr_in *server_address)
 static void render_sender_status(
     const char *pairing_code,
     int authorized,
-    int network_error)
+    int network_error,
+    unsigned int send_rate)
 {
-    ui_render_sender(pairing_code, authorized, network_error);
+    ui_render_sender(pairing_code, authorized, network_error, send_rate);
 }
 
 static void run_controller_sender(
@@ -380,10 +380,11 @@ static void run_controller_sender(
         (1000000ULL + (uint64_t)config->send_rate - 1ULL) /
         (uint64_t)config->send_rate;
     uint64_t next_send = (uint64_t)sceKernelGetSystemTimeWide();
-    uint64_t next_display = next_send;
     uint64_t last_pairing_ack = 0;
     int authorized = 0;
     int last_network_error = 0;
+    int rendered_authorized = -1;
+    int rendered_network_error = -1;
 
     memset(&input, 0, sizeof(input));
     memset(&pad, 0, sizeof(pad));
@@ -471,12 +472,17 @@ static void run_controller_sender(
             /* Do not burst packets after a long scheduler pause. */
             next_send = now + period_us;
         }
-        if (now >= next_display) {
+        if (
+            authorized != rendered_authorized ||
+            last_network_error != rendered_network_error
+        ) {
             render_sender_status(
                 pairing_code,
                 authorized,
-                last_network_error);
-            next_display = now + DISPLAY_PERIOD_US;
+                last_network_error,
+                config->send_rate);
+            rendered_authorized = authorized;
+            rendered_network_error = last_network_error;
         }
     }
 }
@@ -505,9 +511,8 @@ int main(int argc, char *argv[])
     int error = 0;
     uint32_t session_token;
     char pairing_code[6];
+    char config_path[256];
 
-    (void)argc;
-    (void)argv;
     ui_init();
     session_token = generate_session_token();
     format_session_token(session_token, pairing_code);
@@ -534,7 +539,21 @@ int main(int argc, char *argv[])
     }
 
     config_set_defaults(&config);
-    error = config_load(NIW_PSP_TO_PC_CONFIG_PATH, &config);
+    if (
+        config_resolve_path(
+            argc > 0 ? argv[0] : NULL,
+            config_path,
+            sizeof(config_path)
+        ) != 0
+    ) {
+        show_fatal_error(
+            pairing_code,
+            "Could not resolve config.ini path",
+            -1);
+        sceKernelExitGame();
+        return 1;
+    }
+    error = config_load(config_path, &config);
     if (error < 0) {
         show_fatal_error(
             pairing_code,
@@ -564,7 +583,10 @@ int main(int argc, char *argv[])
     }
 
     if (sceWlanGetSwitchState() == 0) {
-        show_fatal_error(pairing_code, "WLAN switch is OFF", 0);
+        show_fatal_error(
+            pairing_code,
+            "WLAN unavailable/off; PSP Street is unsupported",
+            0);
         sceKernelExitGame();
         return 1;
     }

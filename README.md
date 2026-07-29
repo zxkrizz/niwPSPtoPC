@@ -18,7 +18,10 @@ including The Witcher.
 - live pixel-art input view on Windows;
 - graphical PSP interface and custom XMB icon/background;
 - stale, duplicate and out-of-order packets never roll input back;
-- automatic release of every control after 1.5 seconds without fresh input;
+- automatic neutral input after 0.5 seconds of silence without unplugging the
+  virtual controller;
+- automatic PSP session release after 1.75 seconds without fresh input;
+- built-in Connection Doctor with observable pairing stages and targeted help;
 - no jitter buffer, keeping controller input as fresh as possible.
 
 The physical PSP provides one analog stick, a D-pad, four face buttons, L/R,
@@ -29,7 +32,7 @@ because the console does not have those inputs.
 
 ### PSP
 
-- a PSP with CFW and homebrew support;
+- a PSP-1000, PSP-2000, PSP-3000 or PSP Go with CFW and homebrew support;
 - one saved infrastructure Wi-Fi profile configured for legacy WPA-PSK;
 - a 2.4 GHz network compatible with the PSP;
 - PSP and PC connected to the same local network.
@@ -38,9 +41,13 @@ because the console does not have those inputs.
 > The PSP cannot connect to modern WPA2/WPA3-only networks. Using
 > niwPSPtoPC requires a legacy WPA-PSK Wi-Fi network, an obsolete security
 > standard with known weaknesses. Enabling it can reduce the security of your
-> wireless network. Use a separate, isolated guest network or dedicated access
-> point with no access to sensitive devices or data. Do not weaken the security
-> of your primary home network solely to use this software.
+> wireless network. Use a dedicated access point or isolated SSID with no
+> access to sensitive devices or data, but make sure PSP-to-PC peer traffic is
+> allowed. Many guest networks enable client isolation and therefore cannot
+> carry niwPSPtoPC traffic. Do not weaken the security of your primary home
+> network solely to use this software.
+
+PSP Street/E1000 is not supported because that model has no Wi-Fi hardware.
 
 ### Windows
 
@@ -58,24 +65,35 @@ backend required by `vgamepad`.
 1. Download both release archives from the latest GitHub Release.
 2. Install ViGEmBus on the Windows PC.
 3. Extract the Windows archive and start `niwPSPtoPC.exe`.
-4. Extract the PSP archive and copy the complete `niwPSPtoPC` directory to:
+4. Extract the PSP archive and copy the complete `niwPSPtoPC` directory to
+   Memory Stick storage:
 
    ```text
    ms0:/PSP/GAME/niwPSPtoPC/
    ```
+
+   On a PSP Go using internal storage, use
+   `ef0:/PSP/GAME/niwPSPtoPC/` instead.
 
 5. Start **niwPSPtoPC** from the PSP Game menu.
 6. Select a saved Wi-Fi profile with LEFT/RIGHT and confirm with CROSS.
 7. Enter the five-character code shown on the PSP into the Windows app.
 8. When both screens show a connected controller, start the game.
 
-The PSP discovers the PC automatically. `config.ini` only contains the UDP
-port and send rate and normally does not need to be edited.
+The PSP discovers the PC automatically. `config.ini` is loaded next to the
+EBOOT on either `ms0:` or `ef0:`. If it is missing, safe defaults are used.
+The optional send rate is limited to 15–60 Hz and is shown accurately in both
+interfaces.
 
 Use **Use another code** in the Windows app to release the current session.
 Press HOME to close the PSP client.
 
 ## Windows firewall
+
+Connection Doctor shows `port bound`, `packet received`, `code matched`,
+`ACK sent`, and `gamepad created`. If it stops at `port bound`, check the
+Windows Private network profile, firewall, matching UDP port, client isolation
+and whether broadcast traffic can reach the PC interface.
 
 Windows normally asks for private-network access on first launch. If it does
 not, run this command in an administrator PowerShell:
@@ -130,19 +148,22 @@ python -m pc_server.gui
 
 ### Release archives
 
-After building both applications:
+The release command runs tests, rebuilds both applications with the pinned
+PSPDEV revision (Docker image or matching WSL toolchain), smoke-tests the EXE,
+validates versions/freshness and verifies the resulting archives:
 
 ```powershell
 .\scripts\package-release.ps1
 ```
 
 This creates the two public ZIP archives and `SHA256SUMS.txt` under
-`dist/release/`.
+`dist/release/`. Tagged `vX.Y.Z` builds are independently rebuilt and
+published by the Release workflow; branch CI ignores tags.
 
 ## Diagnostics and tests
 
-The public GUI intentionally shows only pairing, PSP input and virtual-pad
-state. Detailed counters remain available in the command-line tools:
+The GUI includes Connection Doctor for pairing and driver failures. Detailed
+packet counters remain available in the command-line tools:
 
 ```powershell
 cd pc-server
@@ -173,8 +194,9 @@ traffic on that LAN. The protocol must not be exposed directly to the
 Internet.
 
 The required legacy WPA-PSK network is less secure than current WPA2/WPA3
-networks. Run the PSP on an isolated guest network or dedicated access point,
-and do not place trusted or sensitive devices on that network.
+networks. Run the PSP on a dedicated access point or isolated SSID, allow
+peer-to-peer traffic between the PSP and PC, and do not place trusted or
+sensitive devices on that network.
 
 See [SECURITY.md](SECURITY.md) for reporting security issues.
 

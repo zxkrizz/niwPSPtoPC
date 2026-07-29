@@ -14,6 +14,7 @@ from pc_server.protocol import (
     InputPacket,
     InvalidMagicError,
     InvalidPacketSizeError,
+    InvalidReservedFieldError,
     PacketLengthError,
     UnsupportedVersionError,
     decode_packet,
@@ -67,6 +68,26 @@ class ProtocolTests(unittest.TestCase):
     def test_invalid_datagram_length(self) -> None:
         with self.assertRaises(PacketLengthError):
             decode_packet(encode_packet(self.packet)[:-1])
+
+    def test_nonzero_reserved_field_is_rejected(self) -> None:
+        data = bytearray(encode_packet(self.packet))
+        struct.pack_into("!H", data, 18, 1)
+
+        with self.assertRaises(InvalidReservedFieldError):
+            decode_packet(bytes(data))
+
+        with self.assertRaises(ValueError):
+            encode_packet(
+                InputPacket(
+                    sequence=1,
+                    buttons=0,
+                    analog_x=128,
+                    analog_y=128,
+                    reserved=1,
+                    timestamp_us=1,
+                    session_token=0,
+                )
+            )
 
     def test_wire_format_is_network_byte_order(self) -> None:
         encoded = encode_packet(self.packet)

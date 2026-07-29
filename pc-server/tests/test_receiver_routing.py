@@ -12,7 +12,7 @@ from pc_server.protocol import (
     encode_packet,
     parse_pairing_token,
 )
-from pc_server.receiver import SequenceEvent, UdpReceiver
+from pc_server.receiver import ReceiverStage, SequenceEvent, UdpReceiver
 
 
 def packet(
@@ -267,6 +267,7 @@ class SocketLoopTests(unittest.TestCase):
         token = parse_pairing_token("ABCDE")
         state_received = threading.Event()
         listening = threading.Event()
+        stages = []
         address_holder: list[tuple[str, int]] = []
         receiver = UdpReceiver(
             "127.0.0.1",
@@ -274,6 +275,7 @@ class SocketLoopTests(unittest.TestCase):
             pairing_token=token,
             require_pairing=True,
             on_packet=lambda _snapshot: state_received.set(),
+            on_stage=stages.append,
             on_listening=lambda address: (
                 address_holder.append(address),
                 listening.set(),
@@ -297,6 +299,62 @@ class SocketLoopTests(unittest.TestCase):
 
         self.assertEqual(decode_pairing_ack(ack), token)
         self.assertEqual(ack_address, address_holder[0])
+        self.assertEqual(
+            {event.stage for event in stages},
+            {
+                ReceiverStage.PORT_BOUND,
+                ReceiverStage.PACKET_RECEIVED,
+                ReceiverStage.CODE_MATCHED,
+                ReceiverStage.ACK_SENT,
+            },
+        )
+        self.assertFalse(thread.is_alive())
+
+    def test_pairing_ack_is_rate_limited_to_ten_hz(self) -> None:
+        token = parse_pairing_token("ABCDE")
+        listening = threading.Event()
+        address_holder: list[tuple[str, int]] = []
+        receiver = UdpReceiver(
+            "127.0.0.1",
+            0,
+            pairing_token=token,
+            require_pairing=True,
+            on_listening=lambda address: (
+                address_holder.append(address),
+                listening.set(),
+            ),
+        )
+        thread = threading.Thread(target=receiver.run, daemon=True)
+        thread.start()
+        self.assertTrue(listening.wait(2.0))
+
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+            destination = address_holder[0]
+            sender.settimeout(2.0)
+            sender.sendto(
+                encode_packet(packet(0, session_token=token)),
+                destination,
+            )
+            first_ack, _ = sender.recvfrom(128)
+            sender.settimeout(0.05)
+            sender.sendto(
+                encode_packet(packet(1, session_token=token)),
+                destination,
+            )
+            with self.assertRaises(socket.timeout):
+                sender.recvfrom(128)
+            time.sleep(0.11)
+            sender.settimeout(2.0)
+            sender.sendto(
+                encode_packet(packet(2, session_token=token)),
+                destination,
+            )
+            second_ack, _ = sender.recvfrom(128)
+
+        receiver.request_stop()
+        thread.join(2.0)
+        self.assertEqual(decode_pairing_ack(first_ack), token)
+        self.assertEqual(decode_pairing_ack(second_ack), token)
         self.assertFalse(thread.is_alive())
 
     def test_second_client_with_same_token_receives_no_ack(self) -> None:

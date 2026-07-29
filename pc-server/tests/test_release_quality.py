@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import re
 import unittest
 
 from pc_server import __version__
@@ -68,16 +67,39 @@ class ReleaseQualityTests(unittest.TestCase):
         pyproject = (ROOT / "pc-server" / "pyproject.toml").read_text(
             encoding="utf-8"
         )
-        version_info = (
-            ROOT / "pc-server" / "windows-version-info.txt"
+        version_source = (
+            ROOT / "pc-server" / "pc_server" / "_version.py"
         ).read_text(encoding="utf-8")
-        self.assertRegex(
+        self.assertIn('dynamic = ["version"]', pyproject)
+        self.assertIn(
+            'version = {attr = "pc_server.__version__"}',
             pyproject,
-            rf'(?m)^version = "{re.escape(__version__)}"$',
         )
         self.assertIn(
-            f"StringStruct('ProductVersion', '{__version__}')",
-            version_info,
+            f'__version__ = "{__version__}"',
+            version_source,
+        )
+
+    def test_pspdev_image_is_pinned(self) -> None:
+        image = (ROOT / "scripts" / "pspdev-image.txt").read_text(
+            encoding="utf-8"
+        ).strip()
+        self.assertRegex(
+            image,
+            r"^pspdev/pspdev:v[0-9]+@sha256:[0-9a-f]{64}$",
+        )
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("pspdev/pspdev:latest", workflow)
+
+    def test_gui_passes_allowed_hosts_to_receiver(self) -> None:
+        gui = (ROOT / "pc-server" / "pc_server" / "gui.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "allowed_hosts=set(settings.allowed_hosts) or None",
+            gui,
         )
 
 

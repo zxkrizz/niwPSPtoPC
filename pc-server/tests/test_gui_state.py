@@ -7,11 +7,14 @@ try:
 except ModuleNotFoundError as exc:
     raise unittest.SkipTest("Tkinter is not available in this environment") from exc
 
+from pc_server.connection_doctor import ConnectionDoctor, DoctorStage
 from pc_server.gamepad import ControllerEvent, ControllerEventType
 from pc_server.gui import NiwPspToPcApp
 from pc_server.protocol import InputPacket, parse_pairing_token
 from pc_server.receiver import (
     ReceiverSnapshot,
+    ReceiverEvent,
+    ReceiverStage,
     SequenceEvent,
     SequenceResult,
 )
@@ -39,6 +42,7 @@ class FakeReceiver:
 class FakeControllerService:
     def __init__(self) -> None:
         self.reasons: list[str] = []
+        self.gamepad_ready = True
 
     def disconnect(self, reason: str) -> None:
         self.reasons.append(reason)
@@ -54,6 +58,7 @@ class FakeControllerView:
         self.packets: list[InputPacket] = []
         self.links: list[tuple[str, str]] = []
         self.neutralized = 0
+        self.rates: list[float] = []
 
     def set_packet(self, packet: InputPacket) -> None:
         self.packets.append(packet)
@@ -63,6 +68,9 @@ class FakeControllerView:
 
     def neutralize(self) -> None:
         self.neutralized += 1
+
+    def set_input_rate(self, rate: float) -> None:
+        self.rates.append(rate)
 
 
 def snapshot() -> ReceiverSnapshot:
@@ -102,6 +110,9 @@ class GuiStateTests(unittest.TestCase):
         self.app._running = True
         self.app._paired_address = None
         self.app._active_token = None
+        self.app._doctor = ConnectionDoctor()
+        self.app._doctor_port = 47999
+        self.app._doctor_row_labels = []
         self.statuses = []
         self.app._set_status = lambda *args: self.statuses.append(args)
 
@@ -138,6 +149,7 @@ class GuiStateTests(unittest.TestCase):
         self.assertEqual(self.app._paired_address, ("10.0.0.33", 51060))
         self.assertEqual(self.statuses[-1][0], "PSP CONNECTED")
         self.assertEqual(self.app.controller_view.packets, [current.packet])
+        self.assertEqual(self.app.controller_view.rates, [59.5])
         self.assertEqual(
             self.app.controller_view.links[-1],
             ("LINK ACTIVE", "CONTROLLER READY"),
@@ -152,12 +164,36 @@ class GuiStateTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(self.app.gamepad_var.value, "OFFLINE")
+        self.assertEqual(self.app.gamepad_var.value, "READY")
         self.assertEqual(self.statuses[-1][0], "CONNECTION LOST")
         self.assertEqual(self.app.controller_view.neutralized, 1)
         self.assertEqual(
             self.app.controller_view.links[-1],
             ("SIGNAL LOST", "WAITING FOR PSP"),
+        )
+
+    def test_receiver_stage_updates_connection_doctor(self) -> None:
+        self.app._apply_receiver_stage(
+            ReceiverEvent(
+                ReceiverStage.PACKET_RECEIVED,
+                ("10.0.0.33", 51060),
+            )
+        )
+
+        self.assertIn(
+            DoctorStage.PACKET_RECEIVED,
+            self.app._doctor.completed,
+        )
+
+    def test_gamepad_ready_updates_connection_doctor(self) -> None:
+        self.app._apply_controller_event(
+            ControllerEvent(ControllerEventType.GAMEPAD_READY)
+        )
+
+        self.assertEqual(self.app.gamepad_var.value, "READY")
+        self.assertIn(
+            DoctorStage.GAMEPAD_CREATED,
+            self.app._doctor.completed,
         )
 
     def test_clear_pairing_forgets_session(self) -> None:
