@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pc-server:
+    name: PC server (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    defaults:
+      run:
+        working-directory: pc-server
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Compile modules
+        run: python -m compileall -q pc_server
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Run host C compatibility tests
+        working-directory: .
+        run: sh ./scripts/test-c-protocol.sh
+
+      - name: Check command-line entry points
+        run: |
+          python -m pc_server --help
+          python -m pc_server.simulator --help
+
+  psp-client:
+    name: PSP client
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Build with PSPDEV
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            pspdev/pspdev:latest \
+            bash ./scripts/build-psp.sh
+
+      - name: Package Memory Stick directory
+        run: bash ./scripts/package-psp.sh
+
+      - name: Upload EBOOT package
+        uses: actions/upload-artifact@v7
+        with:
+          name: niwPSPtoPC
+          path: dist/niwPSPtoPC/
+          if-no-files-found: error
+
+  windows-gui:
+    name: Windows GUI executable
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Run GUI and receiver tests
+        working-directory: pc-server
+        run: python -m unittest discover -s tests -v
+
+      - name: Build standalone Windows application
+        shell: pwsh
+        run: |
+          $python = (Get-Command python).Source
+          ./scripts/build-windows.ps1 -Python $python
+
+      - name: Smoke-test packaged application
+        shell: pwsh
+        run: |
+          $process = Start-Process `
+            -FilePath "./dist/windows/niwPSPtoPC.exe" `
+            -ArgumentList "--smoke-test" `
+            -PassThru `
+            -Wait
+          if ($process.ExitCode -ne 0) {
+            throw "GUI smoke test failed with exit code $($process.ExitCode)"
+          }
+
+      - name: Verify packaged dependencies
+        shell: pwsh
+        run: ./scripts/verify-windows-package.ps1
+
+      - name: Upload Windows application
+        uses: actions/upload-artifact@v7
+        with:
+          name: niwPSPtoPC-Windows
+          path: dist/windows/niwPSPtoPC.exe
+          if-no-files-found: error

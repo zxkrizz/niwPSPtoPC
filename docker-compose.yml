@@ -1,0 +1,9 @@
+services:
+  psp-build:
+    # Official PSPDEV CI image documented by the pspdev/pspdev maintainers.
+    # Use `docker compose pull` to refresh it deliberately.
+    image: pspdev/pspdev:latest
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    command: ["bash", "./scripts/build-psp.sh"]

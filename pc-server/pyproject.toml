@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "niwpsptopc-receiver"
+version = "1.0.0"
+description = "Receive PSP controller input over Wi-Fi on a PC"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "niwPSPtoPC contributors" }]
+dependencies = []
+
+[project.optional-dependencies]
+windows = [
+  "vgamepad @ https://github.com/yannbouteiller/vgamepad/archive/3f910aa8bbde49a576683db74ad5e4a0879f8a80.zip",
+]
+
+[project.scripts]
+niwpsptopc-receiver = "pc_server.__main__:main"
+niwpsptopc-simulator = "pc_server.simulator:main"
+niwpsptopc-gui = "pc_server.gui:main"
+niwpsptopc-soak = "pc_server.soak:main"
+
+[tool.setuptools]
+packages = ["pc_server"]

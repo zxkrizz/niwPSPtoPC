@@ -1,0 +1,82 @@
+niwPSPtoPC third-party notices
+================================
+
+The Windows executable includes the following third-party components.
+
+Python
+------
+Copyright (c) 2001-2026 Python Software Foundation. All Rights Reserved.
+Licensed under the Python Software Foundation License Version 2.
+Full terms: https://docs.python.org/3/license.html
+
+PyInstaller bootloader
+----------------------
+Copyright (c) 2010-2026 PyInstaller Development Team.
+Copyright (c) 2005-2009 Giovanni Bajo.
+Based on previous work Copyright (c) 2002 McMillan Enterprises, Inc.
+
+PyInstaller is licensed under GPL-2.0-or-later with a Bootloader Exception
+that permits distributing executables containing the compiled bootloader.
+Full terms:
+https://github.com/pyinstaller/pyinstaller/blob/v6.21.0/COPYING.txt
+
+vgamepad
+--------
+Copyright (c) 2021 Yann Bouteiller
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Source revision:
+https://github.com/yannbouteiller/vgamepad/tree/3f910aa8bbde49a576683db74ad5e4a0879f8a80
+
+ViGEmClient
+-----------
+Copyright (c) 2018 Benjamin Höglinger-Stelzer
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Source: https://github.com/nefarius/ViGEmClient
+
+ViGEmBus driver
+---------------
+ViGEmBus is not bundled with niwPSPtoPC. Users install its final signed
+release separately. It is licensed under BSD-3-Clause and has been retired by
+its maintainers.
+
+Source and license: https://github.com/nefarius/ViGEmBus

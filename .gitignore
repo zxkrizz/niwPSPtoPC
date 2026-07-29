@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.build-venv/
+
+# PSP build products
+psp-client/*.elf
+psp-client/*.prx
+psp-client/*.o
+psp-client/src/*.o
+psp-client/EBOOT.PBP
+psp-client/PARAM.SFO
+
+# Packages and local tools
+dist/
+build/
+pc-server/build/
+pc-server/dist/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

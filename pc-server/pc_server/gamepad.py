@@ -1,0 +1,352 @@
+"""Safe virtual Xbox 360 controller output.
+
+The controller service deliberately owns its timeout.  Frontends may display
+the same state, but they are not responsible for releasing game input.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum, IntFlag
+import importlib
+import logging
+import threading
+import time
+from typing import Callable, Protocol
+
+from .protocol import Buttons, InputPacket
+from .receiver import ReceiverSnapshot, SequenceEvent
+
+LOGGER = logging.getLogger(__name__)
+DEFAULT_INPUT_TIMEOUT_S = 1.5
+
+
+class XInputButtons(IntFlag):
+    DPAD_UP = 0x0001
+    DPAD_DOWN = 0x0002
+    DPAD_LEFT = 0x0004
+    DPAD_RIGHT = 0x0008
+    START = 0x0010
+    BACK = 0x0020
+    LEFT_SHOULDER = 0x0100
+    RIGHT_SHOULDER = 0x0200
+    A = 0x1000
+    B = 0x2000
+    X = 0x4000
+    Y = 0x8000
+
+
+PSP_TO_XINPUT = {
+    Buttons.UP: XInputButtons.DPAD_UP,
+    Buttons.DOWN: XInputButtons.DPAD_DOWN,
+    Buttons.LEFT: XInputButtons.DPAD_LEFT,
+    Buttons.RIGHT: XInputButtons.DPAD_RIGHT,
+    Buttons.CROSS: XInputButtons.A,
+    Buttons.CIRCLE: XInputButtons.B,
+    Buttons.SQUARE: XInputButtons.X,
+    Buttons.TRIANGLE: XInputButtons.Y,
+    Buttons.L: XInputButtons.LEFT_SHOULDER,
+    Buttons.R: XInputButtons.RIGHT_SHOULDER,
+    Buttons.START: XInputButtons.START,
+    Buttons.SELECT: XInputButtons.BACK,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class Xbox360State:
+    buttons: XInputButtons = XInputButtons(0)
+    left_x: int = 0
+    left_y: int = 0
+
+
+NEUTRAL_STATE = Xbox360State()
+
+
+def _horizontal_axis(value: int) -> int:
+    if not 0 <= value <= 255:
+        raise ValueError("analog value must be between 0 and 255")
+    if value < 128:
+        return round((value - 128) * 32768 / 128)
+    if value > 128:
+        return round((value - 128) * 32767 / 127)
+    return 0
+
+
+def _vertical_axis(value: int) -> int:
+    """Map PSP screen coordinates to XInput's positive-up Y axis."""
+    if not 0 <= value <= 255:
+        raise ValueError("analog value must be between 0 and 255")
+    if value < 128:
+        return round((128 - value) * 32767 / 128)
+    if value > 128:
+        return -round((value - 128) * 32768 / 127)
+    return 0
+
+
+def map_packet_to_xbox360(packet: InputPacket) -> Xbox360State:
+    buttons = XInputButtons(0)
+    pressed = packet.pressed_buttons
+    for psp_button, xinput_button in PSP_TO_XINPUT.items():
+        if pressed & psp_button:
+            buttons |= xinput_button
+    return Xbox360State(
+        buttons=buttons,
+        left_x=_horizontal_axis(packet.analog_x),
+        left_y=_vertical_axis(packet.analog_y),
+    )
+
+
+class GamepadBackend(Protocol):
+    """Minimal backend contract used by the safety controller."""
+
+    def connect(self) -> None: ...
+
+    def apply(self, state: Xbox360State) -> None: ...
+
+    def neutralize(self) -> None: ...
+
+    def disconnect(self) -> None: ...
+
+
+class VGamepadBackend:
+    """Xbox 360 backend powered by vgamepad and the ViGEmBus driver."""
+
+    def __init__(self) -> None:
+        self._module: object | None = None
+        self._gamepad: object | None = None
+
+    def connect(self) -> None:
+        if self._gamepad is not None:
+            return
+        try:
+            module = importlib.import_module("vgamepad")
+        except ImportError as exc:
+            raise RuntimeError(
+                "The vgamepad package is missing. Install the application's "
+                "'windows' extra."
+            ) from exc
+        self._module = module
+        try:
+            self._gamepad = module.VX360Gamepad()  # type: ignore[attr-defined]
+        except Exception as exc:
+            self._module = None
+            raise RuntimeError(
+                "Could not connect the virtual controller. "
+                "Install the ViGEmBus driver."
+            ) from exc
+
+    def apply(self, state: Xbox360State) -> None:
+        if self._gamepad is None or self._module is None:
+            raise RuntimeError("virtual gamepad is not connected")
+        gamepad = self._gamepad
+        module = self._module
+        gamepad.reset()  # type: ignore[attr-defined]
+        if state.buttons:
+            gamepad.press_button(  # type: ignore[attr-defined]
+                button=module.XUSB_BUTTON(int(state.buttons))  # type: ignore[attr-defined]
+            )
+        gamepad.left_joystick(  # type: ignore[attr-defined]
+            x_value=state.left_x,
+            y_value=state.left_y,
+        )
+        gamepad.update()  # type: ignore[attr-defined]
+
+    def neutralize(self) -> None:
+        if self._gamepad is None:
+            return
+        self._gamepad.reset()  # type: ignore[attr-defined]
+        self._gamepad.update()  # type: ignore[attr-defined]
+
+    def disconnect(self) -> None:
+        # vgamepad removes the ViGEm target when the last Python reference is
+        # released.  Neutralize is always called by ControllerService first.
+        self._gamepad = None
+        self._module = None
+
+
+class ControllerEventType(Enum):
+    CONNECTED = "connected"
+    DISCONNECTED = "disconnected"
+    ERROR = "error"
+
+
+@dataclass(frozen=True, slots=True)
+class ControllerEvent:
+    event: ControllerEventType
+    address: tuple[str, int] | None = None
+    reason: str = ""
+    error: str | None = None
+
+
+class ControllerService:
+    """Apply fresh receiver states and fail closed after input silence."""
+
+    _ACCEPTED_EVENTS = {
+        SequenceEvent.FIRST,
+        SequenceEvent.IN_ORDER,
+        SequenceEvent.GAP,
+    }
+
+    def __init__(
+        self,
+        backend_factory: Callable[[], GamepadBackend] = VGamepadBackend,
+        *,
+        timeout_s: float = DEFAULT_INPUT_TIMEOUT_S,
+        on_event: Callable[[ControllerEvent], None] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        start_watchdog: bool = True,
+    ) -> None:
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
+        self._backend_factory = backend_factory
+        self._timeout_s = timeout_s
+        self._on_event = on_event
+        self._clock = clock
+        self._backend: GamepadBackend | None = None
+        self._address: tuple[str, int] | None = None
+        self._last_update_at: float | None = None
+        self._connected = False
+        self._backend_failed = False
+        self._stopped = False
+        self._lock = threading.RLock()
+        self._stop_event = threading.Event()
+        self._watchdog_thread: threading.Thread | None = None
+        if start_watchdog:
+            self._watchdog_thread = threading.Thread(
+                target=self._watchdog,
+                name="niwPSPtoPC controller safety watchdog",
+                daemon=True,
+            )
+            self._watchdog_thread.start()
+
+    @property
+    def connected(self) -> bool:
+        with self._lock:
+            return self._connected
+
+    @property
+    def address(self) -> tuple[str, int] | None:
+        with self._lock:
+            return self._address
+
+    def handle_snapshot(self, snapshot: ReceiverSnapshot) -> bool:
+        """Apply an actionable snapshot; reject diagnostics defensively."""
+        if (
+            not snapshot.is_state_update
+            or snapshot.sequence_result.event not in self._ACCEPTED_EVENTS
+        ):
+            return False
+
+        event: ControllerEvent | None = None
+        with self._lock:
+            if self._stopped or self._backend_failed:
+                return False
+            if self._connected and self._address != snapshot.address:
+                self._disconnect_locked("client-changed")
+
+            try:
+                if self._backend is None:
+                    self._backend = self._backend_factory()
+                    self._backend.connect()
+                self._backend.apply(map_packet_to_xbox360(snapshot.packet))
+            except Exception as exc:
+                LOGGER.exception("Virtual gamepad update failed")
+                self._disconnect_locked("backend-error")
+                self._backend_failed = True
+                event = ControllerEvent(
+                    ControllerEventType.ERROR,
+                    address=snapshot.address,
+                    reason="backend-error",
+                    error=str(exc),
+                )
+            else:
+                was_connected = self._connected
+                self._connected = True
+                self._address = snapshot.address
+                self._last_update_at = self._clock()
+                if not was_connected:
+                    event = ControllerEvent(
+                        ControllerEventType.CONNECTED,
+                        address=snapshot.address,
+                    )
+        if event is not None:
+            self._emit(event)
+        return event is None or event.event is ControllerEventType.CONNECTED
+
+    def check_timeout(self, now: float | None = None) -> bool:
+        """Neutralize and disconnect when no accepted state arrived in time."""
+        event: ControllerEvent | None = None
+        with self._lock:
+            if not self._connected or self._last_update_at is None:
+                return False
+            checked_at = self._clock() if now is None else now
+            if checked_at - self._last_update_at < self._timeout_s:
+                return False
+            address = self._address
+            self._disconnect_locked("timeout")
+            event = ControllerEvent(
+                ControllerEventType.DISCONNECTED,
+                address=address,
+                reason="timeout",
+            )
+        self._emit(event)
+        return True
+
+    def disconnect(self, reason: str = "manual") -> None:
+        event: ControllerEvent | None = None
+        with self._lock:
+            address = self._address
+            had_connection = self._connected or self._backend is not None
+            self._disconnect_locked(reason)
+            if reason != "backend-error":
+                self._backend_failed = False
+            if had_connection:
+                event = ControllerEvent(
+                    ControllerEventType.DISCONNECTED,
+                    address=address,
+                    reason=reason,
+                )
+        if event is not None:
+            self._emit(event)
+
+    def stop(self) -> None:
+        with self._lock:
+            if self._stopped:
+                return
+            self._stopped = True
+        self._stop_event.set()
+        self.disconnect("receiver-stopped")
+        thread = self._watchdog_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=1.0)
+
+    def _disconnect_locked(self, reason: str) -> None:
+        backend = self._backend
+        self._backend = None
+        self._connected = False
+        self._address = None
+        self._last_update_at = None
+        if backend is None:
+            return
+        try:
+            backend.neutralize()
+        except Exception:
+            LOGGER.exception(
+                "Failed to send neutral state while disconnecting (%s)", reason
+            )
+        try:
+            backend.disconnect()
+        except Exception:
+            LOGGER.exception("Failed to disconnect virtual gamepad (%s)", reason)
+
+    def _watchdog(self) -> None:
+        interval = min(0.1, self._timeout_s / 4)
+        while not self._stop_event.wait(interval):
+            self.check_timeout()
+
+    def _emit(self, event: ControllerEvent) -> None:
+        if self._on_event is not None:
+            try:
+                self._on_event(event)
+            except Exception:
+                LOGGER.exception("Controller event callback failed")
