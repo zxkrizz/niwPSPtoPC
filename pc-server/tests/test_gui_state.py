@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 import unittest
 from unittest.mock import patch
 
@@ -51,20 +52,28 @@ class FakeControllerService:
 
 
 class StartControllerService:
+    apply_result = True
+
     def __init__(self, **_kwargs: object) -> None:
         self.ready_checks = 0
+        self.gamepad_ready = self.apply_result
+        self.snapshots: list[ReceiverSnapshot] = []
 
     def ensure_backend(self) -> bool:
         self.ready_checks += 1
-        return True
+        return self.gamepad_ready
+
+    def handle_snapshot(self, current: ReceiverSnapshot) -> bool:
+        self.snapshots.append(current)
+        return self.apply_result
 
     def stop(self) -> None:
         pass
 
 
 class StartReceiver:
-    def __init__(self, *_args: object, **_kwargs: object) -> None:
-        pass
+    def __init__(self, *_args: object, **kwargs: object) -> None:
+        self.kwargs = kwargs
 
     def run(self) -> None:
         pass
@@ -242,6 +251,36 @@ class GuiStateTests(unittest.TestCase):
             self.app.start_receiver()
 
         self.assertEqual(self.app._doctor.completed, set())
+
+    def test_receiver_ack_and_gui_packet_require_gamepad_readiness(self) -> None:
+        self.app._settings = GuiSettings()
+        self.app._running = False
+        self.app._closing = False
+        self.app._messages = queue.Queue()
+        self.app._refresh_doctor = lambda: None
+        self.app._refresh_system_diagnostics = lambda: None
+        StartControllerService.apply_result = False
+
+        try:
+            with (
+                patch("pc_server.gui.ControllerService", StartControllerService),
+                patch("pc_server.gui.UdpReceiver", StartReceiver),
+                patch("pc_server.gui.threading.Thread", FakeThread),
+            ):
+                self.app.start_receiver()
+
+            receiver = self.app._receiver
+            service = self.app._controller_service
+            self.assertIsInstance(receiver, StartReceiver)
+            self.assertIsInstance(service, StartControllerService)
+            current = snapshot()
+            receiver.kwargs["on_packet"](current)
+
+            self.assertEqual(service.snapshots, [current])
+            self.assertTrue(self.app._messages.empty())
+            self.assertFalse(receiver.kwargs["pairing_ack_allowed"]())
+        finally:
+            StartControllerService.apply_result = True
 
     def test_clear_pairing_forgets_session(self) -> None:
         self.app.code_var.set("ABCDE")

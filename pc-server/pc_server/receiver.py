@@ -177,6 +177,7 @@ class UdpReceiver:
         on_diagnostic: Callable[[ReceiverSnapshot], None] | None = None,
         on_listening: Callable[[tuple[str, int]], None] | None = None,
         on_stage: Callable[[ReceiverEvent], None] | None = None,
+        pairing_ack_allowed: Callable[[], bool] | None = None,
         allowed_hosts: set[str] | frozenset[str] | None = None,
         pairing_token: int | None = None,
         require_pairing: bool = False,
@@ -197,6 +198,7 @@ class UdpReceiver:
         self.on_diagnostic = on_diagnostic
         self.on_listening = on_listening
         self.on_stage = on_stage
+        self.pairing_ack_allowed = pairing_ack_allowed
         self.allowed_hosts = (
             frozenset(allowed_hosts) if allowed_hosts is not None else None
         )
@@ -419,6 +421,7 @@ class UdpReceiver:
                         snapshot is not None
                         and snapshot.is_active_client
                         and token_matches
+                        and self._pairing_ack_is_allowed()
                     ):
                         now = time.monotonic()
                         last_ack = self._last_ack_sent.get(address)
@@ -688,3 +691,27 @@ class UdpReceiver:
                     count,
                     "" if count == 1 else "s",
                 )
+
+    def _pairing_ack_is_allowed(self) -> bool:
+        """Fail closed when the product cannot confirm controller readiness."""
+        callback = self.pairing_ack_allowed
+        if callback is None:
+            return True
+        try:
+            return bool(callback())
+        except Exception:
+            with self._clients_lock:
+                self._callback_errors += 1
+                count = self._callback_error_counts.get(
+                    "pairing_ack_allowed",
+                    0,
+                ) + 1
+                self._callback_error_counts["pairing_ack_allowed"] = count
+            if count <= 3 or count & (count - 1) == 0:
+                LOGGER.exception(
+                    "Receiver callback pairing_ack_allowed failed "
+                    "(%d failure%s)",
+                    count,
+                    "" if count == 1 else "s",
+                )
+            return False

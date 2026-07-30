@@ -359,6 +359,50 @@ class SocketLoopTests(unittest.TestCase):
         )
         self.assertFalse(thread.is_alive())
 
+    def test_pairing_ack_waits_for_controller_backend_readiness(self) -> None:
+        token = parse_pairing_token("ABCDE")
+        listening = threading.Event()
+        address_holder: list[tuple[str, int]] = []
+        backend_ready = False
+        receiver = UdpReceiver(
+            "127.0.0.1",
+            0,
+            pairing_token=token,
+            require_pairing=True,
+            pairing_ack_allowed=lambda: backend_ready,
+            on_listening=lambda address: (
+                address_holder.append(address),
+                listening.set(),
+            ),
+        )
+        thread = threading.Thread(target=receiver.run, daemon=True)
+        thread.start()
+        self.assertTrue(listening.wait(2.0))
+
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+            sender.settimeout(0.1)
+            destination = address_holder[0]
+            sender.sendto(
+                encode_packet(packet(0, session_token=token)),
+                destination,
+            )
+            with self.assertRaises(socket.timeout):
+                sender.recvfrom(128)
+
+            backend_ready = True
+            sender.settimeout(2.0)
+            sender.sendto(
+                encode_packet(packet(1, session_token=token)),
+                destination,
+            )
+            ack, _address = sender.recvfrom(128)
+
+        receiver.request_stop()
+        thread.join(2.0)
+
+        self.assertEqual(decode_pairing_ack(ack), token)
+        self.assertFalse(thread.is_alive())
+
     def test_pairing_ack_is_rate_limited_to_ten_hz(self) -> None:
         token = parse_pairing_token("ABCDE")
         listening = threading.Event()

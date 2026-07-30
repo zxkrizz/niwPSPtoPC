@@ -31,6 +31,7 @@ Current release: **1.1.0**. See the
   live UDP health and a copyable report;
 - editable UDP bind, port and PSP IP allowlist settings;
 - recoverable virtual-gamepad preflight without restarting the receiver;
+- PSP readiness confirmation only after the virtual gamepad is available;
 - no jitter buffer, keeping controller input as fresh as possible.
 
 The physical PSP provides one analog stick, a D-pad, four face buttons, L/R,

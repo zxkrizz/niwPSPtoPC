@@ -1329,8 +1329,8 @@ class NiwPspToPcApp:
         controller_service = self._controller_service
 
         def apply_controller_state(snapshot: ReceiverSnapshot) -> None:
-            self._messages.put(("packet", snapshot))
-            controller_service.handle_snapshot(snapshot)
+            if controller_service.handle_snapshot(snapshot):
+                self._messages.put(("packet", snapshot))
 
         receiver = UdpReceiver(
             settings.host,
@@ -1338,6 +1338,7 @@ class NiwPspToPcApp:
             on_packet=apply_controller_state,
             on_listening=lambda address: self._messages.put(("listening", address)),
             on_stage=lambda event: self._messages.put(("stage", event)),
+            pairing_ack_allowed=lambda: controller_service.gamepad_ready,
             allowed_hosts=set(settings.allowed_hosts) or None,
             pairing_token=self._active_token,
             require_pairing=True,

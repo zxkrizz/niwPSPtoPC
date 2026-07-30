@@ -34,8 +34,11 @@ Receivers reject a packet whose `reserved` field is not zero.
 
 ## Pairing ACK
 
-The PC sends an ACK only after accepting an input packet with the configured
-pairing code.
+The product PC application sends an ACK only after accepting an input packet
+with the configured pairing code and confirming that the virtual-controller
+backend is ready. If the backend is unavailable or an input update fails, ACKs
+are withheld until the backend recovers. This prevents the PSP from reporting
+`CONTROLLER READY` when Windows cannot expose the virtual controller.
 
 Struct notation: `!IHHI`.
 
