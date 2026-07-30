@@ -4,8 +4,12 @@ niwPSPtoPC turns a Sony PSP into a wireless Xbox 360 controller for Windows.
 The PSP homebrew client reads the console's controls, discovers the PC
 automatically on the local network, and sends input over Wi-Fi.
 
-The project has been tested on a physical PSP-2004 and in Windows games,
-including The Witcher.
+The project has been tested on a physical PSP-2004 and across multiple Windows
+games.
+
+Current release: **1.1.0**. See the
+[complete 1.1.0 release notes](docs/releases/1.1.0.md) and
+[changelog](CHANGELOG.md).
 
 ![niwPSPtoPC PSP branding](psp-client/assets/PIC1.PNG)
 
@@ -17,11 +21,16 @@ including The Witcher.
 - virtual Xbox 360 controller through ViGEmBus;
 - live pixel-art input view on Windows;
 - graphical PSP interface and custom XMB icon/background;
+- automatic PSP Wi-Fi reconnect and PC rediscovery after an AP outage;
+- automatic PSP backlight shutoff after a stable controller connection;
 - stale, duplicate and out-of-order packets never roll input back;
 - automatic neutral input after 0.5 seconds of silence without unplugging the
   virtual controller;
 - automatic PSP session release after 1.75 seconds without fresh input;
-- built-in Connection Doctor with observable pairing stages and targeted help;
+- Connection Doctor 2.0 with Windows interfaces, profile/firewall checks,
+  live UDP health and a copyable report;
+- editable UDP bind, port and PSP IP allowlist settings;
+- recoverable virtual-gamepad preflight without restarting the receiver;
 - no jitter buffer, keeping controller input as fresh as possible.
 
 The physical PSP provides one analog stick, a D-pad, four face buttons, L/R,
@@ -33,21 +42,32 @@ because the console does not have those inputs.
 ### PSP
 
 - a PSP-1000, PSP-2000, PSP-3000 or PSP Go with CFW and homebrew support;
-- one saved infrastructure Wi-Fi profile configured for legacy WPA-PSK;
+- one working saved infrastructure Wi-Fi profile;
 - a 2.4 GHz network compatible with the PSP;
 - PSP and PC connected to the same local network.
 
-> [!WARNING]
-> The PSP cannot connect to modern WPA2/WPA3-only networks. Using
-> niwPSPtoPC requires a legacy WPA-PSK Wi-Fi network, an obsolete security
-> standard with known weaknesses. Enabling it can reduce the security of your
-> wireless network. Use a dedicated access point or isolated SSID with no
-> access to sensitive devices or data, but make sure PSP-to-PC peer traffic is
-> allowed. Many guest networks enable client isolation and therefore cannot
-> carry niwPSPtoPC traffic. Do not weaken the security of your primary home
-> network solely to use this software.
-
 PSP Street/E1000 is not supported because that model has no Wi-Fi hardware.
+
+### PSP network compatibility
+
+niwPSPtoPC uses the PSP system network APIs and does not depend on the Wi-Fi
+encryption method itself. Once the PSP connects successfully, receives an IPv4
+address and can reach the PC on the same local network, the program works
+normally.
+
+Standard firmware and older CFW configurations generally require a legacy
+WPA-PSK-compatible 2.4 GHz network. Recent
+[ARK-4](https://github.com/PSP-Archive/ARK-4) and ARK-5 CFW releases include
+WPA2 support, so niwPSPtoPC can also be used on a compatible 2.4 GHz WPA2-PSK
+network. Configure and test the Wi-Fi connection in the PSP network settings
+before starting the program. WPA3-only networks remain unsupported by the PSP.
+
+> [!WARNING]
+> If your firmware requires legacy WPA-PSK, use a dedicated access point or
+> isolated SSID with no access to sensitive devices or data. Make sure
+> PSP-to-PC peer traffic is allowed: many guest networks enable client
+> isolation and therefore cannot carry niwPSPtoPC traffic. Do not weaken the
+> security of your primary home network solely to use this software.
 
 ### Windows
 
@@ -86,14 +106,19 @@ The optional send rate is limited to 15–60 Hz and is shown accurately in both
 interfaces.
 
 Use **Use another code** in the Windows app to release the current session.
-Press HOME to close the PSP client.
+The PSP backlight turns off ten seconds after pairing to reduce battery use.
+Press SCREEN or HOME to restore it. It is also restored automatically when the
+connection is lost or the application closes. Press HOME to close the PSP
+client.
 
 ## Windows firewall
 
-Connection Doctor shows `port bound`, `packet received`, `code matched`,
-`ACK sent`, and `gamepad created`. If it stops at `port bound`, check the
-Windows Private network profile, firewall, matching UDP port, client isolation
-and whether broadcast traffic can reach the PC interface.
+Connection Doctor shows `port bound`, `datagram received`, `valid packet`,
+`code matched`, `ACK sent`, and `gamepad created`. It also queries active IPv4
+interfaces, network profiles and the matching Windows firewall rule. If it
+stops at `port bound`, check the Windows Private network profile, firewall,
+matching UDP port, client isolation and whether broadcast traffic can reach
+the PC interface.
 
 Windows normally asks for private-network access on first launch. If it does
 not, run this command in an administrator PowerShell:
@@ -120,6 +145,11 @@ export PATH="$PSPDEV/bin:$PATH"
 ```
 
 The Memory Stick package is written to `dist/niwPSPtoPC/`.
+
+The release uses non-blocking controller peeks in the sender. For physical
+latency/short-press A/B measurements, build the comparison variant with
+`make -C psp-client SENDER_INPUT_MODE=read`; the default is
+`SENDER_INPUT_MODE=peek`.
 
 The native XMB assets can be reproduced without third-party Python packages:
 
@@ -158,12 +188,13 @@ validates versions/freshness and verifies the resulting archives:
 
 This creates the two public ZIP archives and `SHA256SUMS.txt` under
 `dist/release/`. Tagged `vX.Y.Z` builds are independently rebuilt and
-published by the Release workflow; branch CI ignores tags.
+published by the Release workflow using the matching document from
+`docs/releases/`; branch CI ignores tags.
 
 ## Diagnostics and tests
 
-The GUI includes Connection Doctor for pairing and driver failures. Detailed
-packet counters remain available in the command-line tools:
+The GUI includes Connection Doctor 2.0 for network, pairing, packet-health and
+driver failures. The command-line tools remain available for extended runs:
 
 ```powershell
 cd pc-server
@@ -193,10 +224,12 @@ encrypted, and the token is visible to another device capable of capturing
 traffic on that LAN. The protocol must not be exposed directly to the
 Internet.
 
-The required legacy WPA-PSK network is less secure than current WPA2/WPA3
-networks. Run the PSP on a dedicated access point or isolated SSID, allow
-peer-to-peer traffic between the PSP and PC, and do not place trusted or
-sensitive devices on that network.
+When using legacy WPA-PSK, run the PSP on a dedicated access point or isolated
+SSID, allow peer-to-peer traffic between the PSP and PC, and do not place
+trusted or sensitive devices on that network. WPA2 support provided by recent
+ARK-4 and ARK-5 CFW releases avoids the need to enable legacy WPA solely for
+niwPSPtoPC. Regardless of Wi-Fi encryption, use the application only on a
+trusted local network.
 
 See [SECURITY.md](SECURITY.md) for reporting security issues.
 

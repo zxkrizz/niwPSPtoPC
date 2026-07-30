@@ -1,9 +1,9 @@
 # niwPSPtoPC Windows application
 
 The Windows application receives paired PSP input over UDP and exposes it as
-an Xbox 360 controller. Its public GUI contains pairing state, a live
-pixel-art input view and virtual-controller status. Detailed diagnostics stay
-in separate command-line tools.
+an Xbox 360 controller. Its GUI contains pairing state, a live pixel-art input
+view, editable bind/port/allowlist settings, recoverable gamepad preflight and
+Connection Doctor 2.0 with native Windows network checks and live UDP metrics.
 
 ## Requirements
 

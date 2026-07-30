@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 try:
     import tkinter  # noqa: F401
@@ -10,10 +11,11 @@ except ModuleNotFoundError as exc:
 from pc_server.connection_doctor import ConnectionDoctor, DoctorStage
 from pc_server.gamepad import ControllerEvent, ControllerEventType
 from pc_server.gui import NiwPspToPcApp
+from pc_server.gui_settings import GuiSettings
 from pc_server.protocol import InputPacket, parse_pairing_token
 from pc_server.receiver import (
-    ReceiverSnapshot,
     ReceiverEvent,
+    ReceiverSnapshot,
     ReceiverStage,
     SequenceEvent,
     SequenceResult,
@@ -46,6 +48,34 @@ class FakeControllerService:
 
     def disconnect(self, reason: str) -> None:
         self.reasons.append(reason)
+
+
+class StartControllerService:
+    def __init__(self, **_kwargs: object) -> None:
+        self.ready_checks = 0
+
+    def ensure_backend(self) -> bool:
+        self.ready_checks += 1
+        return True
+
+    def stop(self) -> None:
+        pass
+
+
+class StartReceiver:
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        pass
+
+    def run(self) -> None:
+        pass
+
+
+class FakeThread:
+    def __init__(self, **_kwargs: object) -> None:
+        self.started = False
+
+    def start(self) -> None:
+        self.started = True
 
 
 class FakeEntry:
@@ -175,13 +205,13 @@ class GuiStateTests(unittest.TestCase):
     def test_receiver_stage_updates_connection_doctor(self) -> None:
         self.app._apply_receiver_stage(
             ReceiverEvent(
-                ReceiverStage.PACKET_RECEIVED,
+                ReceiverStage.VALID_PACKET,
                 ("10.0.0.33", 51060),
             )
         )
 
         self.assertIn(
-            DoctorStage.PACKET_RECEIVED,
+            DoctorStage.VALID_PACKET,
             self.app._doctor.completed,
         )
 
@@ -195,6 +225,23 @@ class GuiStateTests(unittest.TestCase):
             DoctorStage.GAMEPAD_CREATED,
             self.app._doctor.completed,
         )
+
+    def test_starting_new_receiver_discards_stale_doctor_stages(self) -> None:
+        self.app._doctor.completed.update(DoctorStage)
+        self.app._settings = GuiSettings()
+        self.app._running = False
+        self.app._closing = False
+        self.app._refresh_doctor = lambda: None
+        self.app._refresh_system_diagnostics = lambda: None
+
+        with (
+            patch("pc_server.gui.ControllerService", StartControllerService),
+            patch("pc_server.gui.UdpReceiver", StartReceiver),
+            patch("pc_server.gui.threading.Thread", FakeThread),
+        ):
+            self.app.start_receiver()
+
+        self.assertEqual(self.app._doctor.completed, set())
 
     def test_clear_pairing_forgets_session(self) -> None:
         self.app.code_var.set("ABCDE")

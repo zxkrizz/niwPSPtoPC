@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from pathlib import Path
+import re
 import unittest
+from pathlib import Path
 
 from pc_server import __version__
-
 
 ROOT = Path(__file__).resolve().parents[2]
 POLISH_DIACRITICS = {
@@ -79,6 +79,10 @@ class ReleaseQualityTests(unittest.TestCase):
             f'__version__ = "{__version__}"',
             version_source,
         )
+        release_notes = (
+            ROOT / "docs" / "releases" / f"{__version__}.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn(f"# niwPSPtoPC {__version__}", release_notes)
 
     def test_pspdev_image_is_pinned(self) -> None:
         image = (ROOT / "scripts" / "pspdev-image.txt").read_text(
@@ -101,6 +105,86 @@ class ReleaseQualityTests(unittest.TestCase):
             "allowed_hosts=set(settings.allowed_hosts) or None",
             gui,
         )
+
+    def test_github_actions_are_pinned_to_full_commit_shas(self) -> None:
+        workflows = ROOT / ".github" / "workflows"
+        uses_pattern = re.compile(r"^\s*uses:\s*[^@\s]+@([^#\s]+)", re.MULTILINE)
+        for path in workflows.glob("*.yml"):
+            with self.subTest(workflow=path.name):
+                text = path.read_text(encoding="utf-8")
+                references = uses_pattern.findall(text)
+                self.assertTrue(references)
+                self.assertTrue(
+                    all(re.fullmatch(r"[0-9a-f]{40}", value) for value in references)
+                )
+
+    def test_dependabot_covers_actions_and_python(self) -> None:
+        config = (ROOT / ".github" / "dependabot.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('package-ecosystem: "github-actions"', config)
+        self.assertIn('package-ecosystem: "pip"', config)
+        self.assertIn('directory: "/pc-server"', config)
+
+    def test_release_workflow_checks_ancestry_and_attests_artifacts(self) -> None:
+        workflow = (
+            ROOT / ".github" / "workflows" / "release.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("git merge-base --is-ancestor", workflow)
+        self.assertIn("attest-build-provenance@", workflow)
+        self.assertIn("dist/windows/niwPSPtoPC.exe", workflow)
+        self.assertIn("dist/release/*.zip", workflow)
+        self.assertIn("gh release upload", workflow)
+        self.assertIn("--clobber", workflow)
+        self.assertIn("--notes-file $notes", workflow)
+
+    def test_windows_manifest_is_embedded_and_verified(self) -> None:
+        manifest = (
+            ROOT / "packaging" / "windows" / "niwPSPtoPC.exe.manifest"
+        ).read_text(encoding="utf-8")
+        build = (ROOT / "scripts" / "build-windows.ps1").read_text(
+            encoding="utf-8"
+        )
+        verify = (
+            ROOT / "scripts" / "verify-windows-package.ps1"
+        ).read_text(encoding="utf-8")
+        self.assertIn("PerMonitorV2", manifest)
+        self.assertIn("--manifest $Manifest", build)
+        self.assertIn("PerMonitorV2", verify)
+
+    def test_psp_sender_has_reconnect_and_nonblocking_input(self) -> None:
+        source = (ROOT / "psp-client" / "src" / "main.c").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("sceCtrlPeekBufferPositive(pad, 1)", source)
+        self.assertIn("reconnect_wifi_and_socket", source)
+        self.assertIn("RECONNECT_BACKOFF_MAX_SECONDS 10U", source)
+        self.assertIn("PSP_NET_APCTL_STATE_GOT_IP", source)
+        self.assertIn("MAX_ACK_DATAGRAMS_PER_CYCLE 32U", source)
+        self.assertIn(
+            "ack_count < MAX_ACK_DATAGRAMS_PER_CYCLE",
+            source,
+        )
+        self.assertIn("set_performance_clock();", source)
+        self.assertIn("set_power_save_clock();", source)
+        self.assertIn("POWER_SAVE_CPU_MHZ 111", source)
+        self.assertIn("POWER_SAVE_BUS_MHZ 55", source)
+        self.assertIn("DISPLAY_SLEEP_DELAY_US", source)
+        self.assertIn("backlight_turn_off(backlight);", source)
+        self.assertIn("backlight_turn_on(backlight);", source)
+        self.assertIn("PSP_CTRL_HOME | PSP_CTRL_SCREEN", source)
+        self.assertIn('"sceDisplay_Service"', source)
+        self.assertIn('"sceDisplay_driver"', source)
+        self.assertIn("sctrlHENFindFunction(", source)
+        self.assertIn("DISPLAY_SET_BRIGHTNESS_NID", source)
+        self.assertIn("DISPLAY_GET_BRIGHTNESS_NID", source)
+
+        makefile = (ROOT / "psp-client" / "Makefile").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("-lpspdisplay_driver", makefile)
+        self.assertIn("-lpspsystemctrl_user", makefile)
+        self.assertIn("-lpspkubridge", makefile)
 
 
 if __name__ == "__main__":

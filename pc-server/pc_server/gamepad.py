@@ -6,13 +6,14 @@ the same state, but they are not responsible for releasing game input.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum, IntFlag
 import importlib
 import logging
 import threading
 import time
-from typing import Callable, Protocol
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import Enum, IntFlag
+from typing import ClassVar, Protocol
 
 from .protocol import Buttons, InputPacket
 from .receiver import ReceiverSnapshot, SequenceEvent
@@ -20,11 +21,13 @@ from .receiver import ReceiverSnapshot, SequenceEvent
 LOGGER = logging.getLogger(__name__)
 DEFAULT_NEUTRAL_TIMEOUT_S = 0.5
 DEFAULT_SESSION_TIMEOUT_S = 1.75
+DEFAULT_BACKEND_RETRY_DELAY_S = 3.0
 # Kept as the public CLI default name for compatibility.
 DEFAULT_INPUT_TIMEOUT_S = DEFAULT_SESSION_TIMEOUT_S
 
 
 class XInputButtons(IntFlag):
+    NONE = 0x0000
     DPAD_UP = 0x0001
     DPAD_DOWN = 0x0002
     DPAD_LEFT = 0x0004
@@ -55,9 +58,22 @@ PSP_TO_XINPUT = {
 }
 
 
+class BackendFailureKind(Enum):
+    MISSING_LIBRARY = "missing-library"
+    MISSING_DRIVER = "missing-driver"
+    DRIVER_CONNECTION = "driver-connection"
+    UPDATE_FAILED = "update-failed"
+
+
+class GamepadBackendError(RuntimeError):
+    def __init__(self, kind: BackendFailureKind, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
 @dataclass(frozen=True, slots=True)
 class Xbox360State:
-    buttons: XInputButtons = XInputButtons(0)
+    buttons: XInputButtons = XInputButtons.NONE
     left_x: int = 0
     left_y: int = 0
 
@@ -124,18 +140,49 @@ class VGamepadBackend:
         try:
             module = importlib.import_module("vgamepad")
         except ImportError as exc:
-            raise RuntimeError(
+            raise GamepadBackendError(
+                BackendFailureKind.MISSING_LIBRARY,
                 "The vgamepad package is missing. Install the application's "
-                "'windows' extra."
+                "'windows' extra.",
             ) from exc
         self._module = module
         try:
             self._gamepad = module.VX360Gamepad()  # type: ignore[attr-defined]
         except Exception as exc:
             self._module = None
-            raise RuntimeError(
-                "Could not connect the virtual controller. "
-                "Install the ViGEmBus driver."
+            name_and_message = f"{type(exc).__name__} {exc}".lower()
+            missing_library = (
+                "dll" in name_and_message
+                and (
+                    "not found" in name_and_message
+                    or "winerror 126" in name_and_message
+                )
+            )
+            missing_driver = (
+                "vigembus" in name_and_message
+                and (
+                    "not found" in name_and_message
+                    or "notfound" in name_and_message
+                    or "not installed" in name_and_message
+                )
+            )
+            kind = (
+                BackendFailureKind.MISSING_LIBRARY
+                if missing_library
+                else BackendFailureKind.MISSING_DRIVER
+                if missing_driver
+                else BackendFailureKind.DRIVER_CONNECTION
+            )
+            detail = (
+                "The ViGEm client library could not be loaded."
+                if missing_library
+                else "The ViGEmBus driver is not installed."
+                if missing_driver
+                else "Could not connect to the ViGEmBus driver."
+            )
+            raise GamepadBackendError(
+                kind,
+                detail,
             ) from exc
 
     def apply(self, state: Xbox360State) -> None:
@@ -181,16 +228,19 @@ class ControllerEvent:
     address: tuple[str, int] | None = None
     reason: str = ""
     error: str | None = None
+    failure: BackendFailureKind | None = None
 
 
 class ControllerService:
     """Apply fresh receiver states and fail closed after input silence."""
 
-    _ACCEPTED_EVENTS = {
-        SequenceEvent.FIRST,
-        SequenceEvent.IN_ORDER,
-        SequenceEvent.GAP,
-    }
+    _ACCEPTED_EVENTS: ClassVar[frozenset[SequenceEvent]] = frozenset(
+        {
+            SequenceEvent.FIRST,
+            SequenceEvent.IN_ORDER,
+            SequenceEvent.GAP,
+        }
+    )
 
     def __init__(
         self,
@@ -201,6 +251,7 @@ class ControllerService:
         on_event: Callable[[ControllerEvent], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
         start_watchdog: bool = True,
+        backend_retry_delay_s: float = DEFAULT_BACKEND_RETRY_DELAY_S,
     ) -> None:
         if timeout_s <= 0:
             raise ValueError("timeout_s must be positive")
@@ -213,17 +264,23 @@ class ControllerService:
             raise ValueError(
                 "neutral_timeout_s must be positive and shorter than timeout_s"
             )
+        if backend_retry_delay_s <= 0:
+            raise ValueError("backend_retry_delay_s must be positive")
         self._backend_factory = backend_factory
         self._timeout_s = timeout_s
         self._neutral_timeout_s = neutral_timeout_s
         self._on_event = on_event
         self._clock = clock
+        self._backend_retry_delay_s = backend_retry_delay_s
         self._backend: GamepadBackend | None = None
         self._address: tuple[str, int] | None = None
         self._last_update_at: float | None = None
         self._neutralized_for_silence = False
         self._connected = False
         self._backend_failed = False
+        self._backend_failure: BackendFailureKind | None = None
+        self._automatic_retry_due: float | None = None
+        self._automatic_retry_used = False
         self._stopped = False
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
@@ -251,14 +308,31 @@ class ControllerService:
         with self._lock:
             return self._backend is not None and not self._backend_failed
 
-    def ensure_backend(self) -> bool:
+    @property
+    def backend_failure(self) -> BackendFailureKind | None:
+        with self._lock:
+            return self._backend_failure
+
+    def ensure_backend(
+        self,
+        *,
+        force_retry: bool = False,
+        automatic: bool = False,
+    ) -> bool:
         """Create the virtual target early and keep it for the process lifetime."""
         event: ControllerEvent | None = None
         with self._lock:
-            if self._stopped or self._backend_failed:
+            if self._stopped:
+                return False
+            if self._backend_failed and not force_retry:
                 return False
             if self._backend is not None:
                 return True
+            if force_retry:
+                self._backend_failed = False
+                self._backend_failure = None
+                if not automatic:
+                    self._automatic_retry_used = False
             try:
                 self._backend = self._backend_factory()
                 self._backend.connect()
@@ -266,17 +340,38 @@ class ControllerService:
             except Exception as exc:
                 LOGGER.exception("Virtual gamepad preflight failed")
                 self._destroy_backend_locked("backend-error")
-                self._backend_failed = True
-                event = ControllerEvent(
-                    ControllerEventType.ERROR,
-                    reason="backend-error",
-                    error=str(exc),
+                event = self._record_backend_failure_locked(
+                    exc,
+                    phase="preflight",
+                    automatic=automatic,
                 )
             else:
+                self._backend_failed = False
+                self._backend_failure = None
+                self._automatic_retry_due = None
+                self._automatic_retry_used = False
                 event = ControllerEvent(ControllerEventType.GAMEPAD_READY)
         if event is not None:
             self._emit(event)
         return event is not None and event.event is ControllerEventType.GAMEPAD_READY
+
+    def retry_backend(self) -> bool:
+        """Run a fresh preflight without stopping the UDP receiver."""
+        return self.ensure_backend(force_retry=True)
+
+    def check_backend_retry(self, now: float | None = None) -> bool:
+        """Perform the single delayed retry scheduled for a failure episode."""
+        checked_at = self._clock() if now is None else now
+        with self._lock:
+            if (
+                self._stopped
+                or self._automatic_retry_due is None
+                or checked_at < self._automatic_retry_due
+            ):
+                return False
+            self._automatic_retry_due = None
+            self._automatic_retry_used = True
+        return self.ensure_backend(force_retry=True, automatic=True)
 
     def handle_snapshot(self, snapshot: ReceiverSnapshot) -> bool:
         """Apply an actionable snapshot; reject diagnostics defensively."""
@@ -301,12 +396,10 @@ class ControllerService:
             except Exception as exc:
                 LOGGER.exception("Virtual gamepad update failed")
                 self._destroy_backend_locked("backend-error")
-                self._backend_failed = True
-                event = ControllerEvent(
-                    ControllerEventType.ERROR,
+                event = self._record_backend_failure_locked(
+                    exc,
+                    phase="update",
                     address=snapshot.address,
-                    reason="backend-error",
-                    error=str(exc),
                 )
             else:
                 was_connected = self._connected
@@ -368,8 +461,6 @@ class ControllerService:
             address = self._address
             had_connection = self._connected
             self._release_session_locked(reason)
-            if reason != "backend-error":
-                self._backend_failed = False
             if had_connection:
                 event = ControllerEvent(
                     ControllerEventType.DISCONNECTED,
@@ -428,10 +519,68 @@ class ControllerService:
         except Exception:
             LOGGER.exception("Failed to disconnect virtual gamepad (%s)", reason)
 
+    @staticmethod
+    def _classify_backend_failure(
+        error: Exception,
+        *,
+        phase: str,
+    ) -> BackendFailureKind:
+        if isinstance(error, GamepadBackendError):
+            return error.kind
+        if isinstance(error, (ImportError, ModuleNotFoundError)):
+            return BackendFailureKind.MISSING_LIBRARY
+        if phase == "update":
+            return BackendFailureKind.UPDATE_FAILED
+        name_and_message = f"{type(error).__name__} {error}".lower()
+        if (
+            "dll" in name_and_message
+            and (
+                "not found" in name_and_message
+                or "winerror 126" in name_and_message
+            )
+        ):
+            return BackendFailureKind.MISSING_LIBRARY
+        if (
+            "vigembus" in name_and_message
+            and (
+                "not found" in name_and_message
+                or "notfound" in name_and_message
+                or "not installed" in name_and_message
+            )
+        ):
+            return BackendFailureKind.MISSING_DRIVER
+        return BackendFailureKind.DRIVER_CONNECTION
+
+    def _record_backend_failure_locked(
+        self,
+        error: Exception,
+        *,
+        phase: str,
+        address: tuple[str, int] | None = None,
+        automatic: bool = False,
+    ) -> ControllerEvent:
+        failure = self._classify_backend_failure(error, phase=phase)
+        self._backend_failed = True
+        self._backend_failure = failure
+        if not automatic and not self._automatic_retry_used:
+            self._automatic_retry_due = (
+                self._clock() + self._backend_retry_delay_s
+            )
+        else:
+            self._automatic_retry_due = None
+        return ControllerEvent(
+            ControllerEventType.ERROR,
+            address=address,
+            reason=failure.value,
+            error=str(error),
+            failure=failure,
+        )
+
     def _watchdog(self) -> None:
         interval = min(0.1, self._timeout_s / 4)
         while not self._stop_event.wait(interval):
             self.check_timeout()
+            self.check_backend_retry()
 
     def _emit(self, event: ControllerEvent) -> None:
         if self._on_event is not None:

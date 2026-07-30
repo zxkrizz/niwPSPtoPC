@@ -47,4 +47,41 @@ if ($ProductVersion -ne $ExpectedVersion) {
     )
 }
 
+$MtCommand = Get-Command mt.exe -ErrorAction SilentlyContinue
+if (-not $MtCommand) {
+    $WindowsKits = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+    if (Test-Path -LiteralPath $WindowsKits) {
+        $MtCommand = Get-ChildItem `
+            -LiteralPath $WindowsKits `
+            -Filter mt.exe `
+            -Recurse `
+            -File |
+            Where-Object { $_.DirectoryName -match '\\x64$' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+    }
+}
+if (-not $MtCommand) {
+    throw "Windows SDK mt.exe is required to verify the embedded manifest."
+}
+$ExtractedManifest = Join-Path `
+    $ProjectRoot `
+    "build\verified-niwPSPtoPC.exe.manifest"
+New-Item -ItemType Directory -Path (Split-Path -Parent $ExtractedManifest) -Force |
+    Out-Null
+& $MtCommand.FullName `
+    -nologo `
+    "-inputresource:$Executable;#1" `
+    "-out:$ExtractedManifest"
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not extract the embedded Windows application manifest."
+}
+$ManifestText = Get-Content -LiteralPath $ExtractedManifest -Raw
+if ($ManifestText -notmatch '(?i)PerMonitorV2') {
+    throw "The executable manifest does not declare PerMonitorV2 DPI awareness."
+}
+if ($ManifestText -notmatch '(?i)requestedExecutionLevel.+asInvoker') {
+    throw "The executable manifest does not declare asInvoker execution."
+}
+
 Write-Output "Windows package verification passed."

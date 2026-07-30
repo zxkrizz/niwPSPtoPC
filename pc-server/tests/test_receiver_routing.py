@@ -32,6 +32,31 @@ def packet(
 
 
 class ReceiverRoutingTests(unittest.TestCase):
+    def test_rejected_pairing_cache_is_bounded(self) -> None:
+        expected = parse_pairing_token("ABCDE")
+        receiver = UdpReceiver(
+            "127.0.0.1",
+            0,
+            pairing_token=expected,
+            require_pairing=True,
+        )
+        now = time.monotonic()
+
+        for token in range(200):
+            receiver._handle_packet(
+                packet(token, session_token=token),
+                ("10.0.0.33", 51060),
+                now_monotonic=now,
+            )
+
+        self.assertEqual(receiver.rejected_pairing_cache_size, 128)
+        receiver._handle_packet(
+            packet(201, session_token=999),
+            ("10.0.0.33", 51060),
+            now_monotonic=now + 11.0,
+        )
+        self.assertEqual(receiver.rejected_pairing_cache_size, 1)
+
     def test_pairing_rejects_wrong_session_before_client_selection(self) -> None:
         expected = parse_pairing_token("ABCDE")
         states = []
@@ -109,6 +134,29 @@ class ReceiverRoutingTests(unittest.TestCase):
         self.assertEqual(diagnostics[-1].duplicates, 1)
         self.assertEqual(diagnostics[-1].out_of_order, 1)
         self.assertEqual(diagnostics[-1].lost, 2)
+
+    def test_broken_diagnostic_callback_does_not_block_state_callback(self) -> None:
+        states = []
+
+        def broken_diagnostic(_snapshot: object) -> None:
+            raise RuntimeError("diagnostic frontend failed")
+
+        receiver = UdpReceiver(
+            "127.0.0.1",
+            0,
+            on_packet=states.append,
+            on_diagnostic=broken_diagnostic,
+        )
+        address = ("10.0.0.33", 51060)
+
+        receiver._handle_packet(packet(1), address)
+        receiver._handle_packet(packet(2), address)
+
+        self.assertEqual(
+            [snapshot.packet.sequence for snapshot in states],
+            [1, 2],
+        )
+        self.assertEqual(receiver.callback_error_count, 2)
 
     def test_first_client_is_locked_until_released(self) -> None:
         states = []
@@ -303,7 +351,8 @@ class SocketLoopTests(unittest.TestCase):
             {event.stage for event in stages},
             {
                 ReceiverStage.PORT_BOUND,
-                ReceiverStage.PACKET_RECEIVED,
+                ReceiverStage.DATAGRAM_RECEIVED,
+                ReceiverStage.VALID_PACKET,
                 ReceiverStage.CODE_MATCHED,
                 ReceiverStage.ACK_SENT,
             },
@@ -442,6 +491,51 @@ class SocketLoopTests(unittest.TestCase):
             [10, 13],
         )
         self.assertEqual(len(diagnostics), 4)
+
+    def test_broken_callbacks_do_not_stop_receiving_packets(self) -> None:
+        diagnostic_sequences: list[int] = []
+        second_received = threading.Event()
+        listening = threading.Event()
+        address_holder: list[tuple[str, int]] = []
+
+        def broken_packet_callback(_snapshot: object) -> None:
+            raise RuntimeError("frontend failed")
+
+        def diagnostic_callback(snapshot: object) -> None:
+            sequence = snapshot.packet.sequence
+            diagnostic_sequences.append(sequence)
+            if sequence == 2:
+                second_received.set()
+
+        receiver = UdpReceiver(
+            "127.0.0.1",
+            0,
+            on_packet=broken_packet_callback,
+            on_diagnostic=diagnostic_callback,
+            on_listening=lambda address: (
+                address_holder.append(address),
+                listening.set(),
+            ),
+        )
+        thread = threading.Thread(target=receiver.run, daemon=True)
+        thread.start()
+        self.assertTrue(listening.wait(2.0))
+
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+            sender.sendto(encode_packet(packet(1)), address_holder[0])
+            sender.sendto(encode_packet(packet(2)), address_holder[0])
+
+        self.assertTrue(second_received.wait(2.0))
+        receiver.request_stop()
+        thread.join(2.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(diagnostic_sequences, [1, 2])
+        self.assertEqual(receiver.callback_error_count, 2)
+        metrics = receiver.metrics()
+        self.assertEqual(metrics.datagrams_received, 2)
+        self.assertEqual(metrics.valid_packets, 2)
+        self.assertEqual(metrics.rejected_datagrams, 0)
 
 
 if __name__ == "__main__":

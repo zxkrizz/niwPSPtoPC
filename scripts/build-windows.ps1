@@ -37,6 +37,9 @@ $VersionInfo = Join-Path $ProjectRoot "build\windows-version-info.txt"
 $OutputDirectory = Join-Path $ProjectRoot "dist\windows"
 $WorkDirectory = Join-Path $ProjectRoot "build\pyinstaller"
 $Icon = Join-Path $ProjectRoot "build\niwPSPtoPC.ico"
+$Manifest = Join-Path `
+    $ProjectRoot `
+    "packaging\windows\niwPSPtoPC.exe.manifest"
 $Executable = Join-Path $OutputDirectory "niwPSPtoPC.exe"
 
 if (-not (Test-Path -LiteralPath $Python)) {
@@ -91,6 +94,9 @@ if (-not (Test-Path -LiteralPath $VigemClient)) {
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to generate the Windows application icon."
 }
+if (-not (Test-Path -LiteralPath $Manifest -PathType Leaf)) {
+    throw "Windows application manifest not found: $Manifest"
+}
 
 & $BuilderPython `
     (Join-Path $ProjectRoot "scripts\generate-windows-version-info.py") `
@@ -112,6 +118,7 @@ if ($RunningExecutable) {
     --windowed `
     --name niwPSPtoPC `
     --icon $Icon `
+    --manifest $Manifest `
     --version-file $VersionInfo `
     --distpath $OutputDirectory `
     --workpath $WorkDirectory `
