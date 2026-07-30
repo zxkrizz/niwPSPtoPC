@@ -35,4 +35,8 @@ $Eboot = Join-Path $ProjectRoot "psp-client\EBOOT.PBP"
 if (-not (Test-Path -LiteralPath $Eboot -PathType Leaf)) {
     throw "PSP build completed without EBOOT.PBP."
 }
-Write-Output "PSP build ready: $Eboot"
+$UsbHostFs = Join-Path $ProjectRoot "psp-client\usbhostfs.prx"
+if (-not (Test-Path -LiteralPath $UsbHostFs -PathType Leaf)) {
+    throw "PSP build completed without usbhostfs.prx."
+}
+Write-Output "PSP build ready: $Eboot and $UsbHostFs"

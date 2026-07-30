@@ -2,6 +2,32 @@
 
 All notable public changes are documented here.
 
+## 1.2.0 — 2026-07-30
+
+- promoted wired USB input from a development preview to a supported
+  transport after physical PSP-2004 validation;
+- added an explicit USB/Wi-Fi selector on the PSP, with Wi-Fi disabled when
+  the WLAN switch is off and safe return to the selector after cable removal;
+- added matching large USB/Wi-Fi fields in the Windows application, with
+  transport-specific setup, code-free USB authorization and a simplified
+  connected state;
+- added live USB <-> Wi-Fi switching without restarting either application or
+  recreating the virtual Xbox 360 controller;
+- implemented a reconnectable PSP USBHostFS transport that reuses protocol v2,
+  active-client routing, packet ordering, timeouts and controller mapping;
+- added Microsoft OS descriptors for automatic inbox WinUSB selection and a
+  narrowly scoped, one-time elevated repair when Windows omits the device
+  interface;
+- fixed WCID descriptor responses and Windows USB enumeration failures found
+  during physical end-to-end testing;
+- kept the PSP application running when neither a USB cable nor an available
+  Wi-Fi connection is present;
+- added pinned, reproducible USBHostFS builds and included `usbhostfs.prx` in
+  PSP packages with its license notice;
+- refreshed the product as the Ultimate Wireless and Wired Gamepad, simplified
+  the Windows connection diagnostics and expanded USB routing, packaging and
+  provisioning tests.
+
 ## 1.1.0 — 2026-07-30
 
 - added automatic PSP backlight shutoff ten seconds after pairing, with the

@@ -1,14 +1,20 @@
 # niwPSPtoPC
 
-niwPSPtoPC turns a Sony PSP into a wireless Xbox 360 controller for Windows.
-The PSP homebrew client reads the console's controls, discovers the PC
-automatically on the local network, and sends input over Wi-Fi.
+**The Ultimate Wireless and Wired Gamepad for PSP and Windows.**
 
-The project has been tested on a physical PSP-2004 and across multiple Windows
-games.
+niwPSPtoPC turns a Sony PSP into an Xbox 360 controller for Windows over a USB
+data cable or Wi-Fi. Both transports use the same input protocol, safety
+handling and virtual-gamepad mapping. USB connects automatically without a
+pairing code; Wi-Fi uses a five-character code and automatic local-network
+discovery.
 
-Current release: **1.1.0**. See the
-[complete 1.1.0 release notes](docs/releases/1.1.0.md) and
+Version 1.2.0 promotes the wired transport to a supported feature after
+successful physical testing on a PSP-2004, including USB and Wi-Fi input,
+hot-plugging and switching between both transports without restarting either
+application.
+
+Current release: **1.2.0**. See the
+[complete 1.2.0 release notes](docs/releases/1.2.0.md) and
 [changelog](CHANGELOG.md).
 
 ![niwPSPtoPC PSP branding](psp-client/assets/PIC1.PNG)
@@ -16,12 +22,21 @@ Current release: **1.1.0**. See the
 ## Features
 
 - automatic PC discovery — no IP address configuration;
-- five-character pairing code generated on every PSP launch;
+- five-character Wi-Fi pairing code generated on every PSP launch;
 - exclusive control for the first paired PSP;
 - virtual Xbox 360 controller through ViGEmBus;
 - live pixel-art input view on Windows;
 - graphical PSP interface and custom XMB icon/background;
 - automatic PSP Wi-Fi reconnect and PC rediscovery after an AP outage;
+- large USB/Wi-Fi selector on the PSP, with unavailable Wi-Fi disabled when
+  the WLAN switch is off;
+- in-app USB/Wi-Fi switching without restarting either application
+  or recreating the virtual controller;
+- automatic Microsoft-signed WinUSB binding on Windows 10/11, with a
+  one-time-per-device-instance UAC self-repair when Windows omits the
+  application interface;
+- large USB/Wi-Fi selector in the Windows application with transport-specific
+  setup instructions and no pairing form after connection;
 - automatic PSP backlight shutoff after a stable controller connection;
 - stale, duplicate and out-of-order packets never roll input back;
 - automatic neutral input after 0.5 seconds of silence without unplugging the
@@ -43,11 +58,16 @@ because the console does not have those inputs.
 ### PSP
 
 - a PSP-1000, PSP-2000, PSP-3000 or PSP Go with CFW and homebrew support;
-- one working saved infrastructure Wi-Fi profile;
-- a 2.4 GHz network compatible with the PSP;
-- PSP and PC connected to the same local network.
+- for USB: a compatible PSP data cable;
+- for Wi-Fi: one working saved infrastructure Wi-Fi profile, a compatible
+  2.4 GHz network, and the PSP and PC on the same local network.
 
-PSP Street/E1000 is not supported because that model has no Wi-Fi hardware.
+PSP Street/E1000 has no Wi-Fi hardware. USB-only operation is expected, but
+that model has not yet been physically verified and is not included in the
+1.2.0 tested-hardware claim.
+
+For cable-mode setup, Windows driver details and troubleshooting, see
+[`docs/usb.md`](docs/usb.md).
 
 ### PSP network compatibility
 
@@ -97,16 +117,23 @@ backend required by `vgamepad`.
    `ef0:/PSP/GAME/niwPSPtoPC/` instead.
 
 5. Start **niwPSPtoPC** from the PSP Game menu.
-6. Select a saved Wi-Fi profile with LEFT/RIGHT and confirm with CROSS.
-7. Enter the five-character code shown on the PSP into the Windows app.
-8. When both screens show a connected controller, start the game.
+6. Select **USB** or **WIFI** with LEFT/RIGHT and confirm with CROSS.
+7. For USB, connect the data cable; no code is required.
+8. For Wi-Fi, select a saved profile, select the large **Wi-Fi** field in the
+   Windows app, and enter the five-character code shown on the PSP.
+9. When both screens show a connected controller, start the game.
 
 The PSP discovers the PC automatically. `config.ini` is loaded next to the
 EBOOT on either `ms0:` or `ef0:`. If it is missing, safe defaults are used.
 The optional send rate is limited to 15–60 Hz and is shown accurately in both
 interfaces.
 
-Use **Use another code** in the Windows app to release the current session.
+Hold **L+R+START** for 0.75 seconds while connected to return to the PSP
+connection selector. Select the other large transport field in the Windows
+app when preparing a switch. CIRCLE returns to the PSP selector while USB is
+waiting for a cable or Wi-Fi is selecting/reconnecting. Removing the USB cable
+also returns to the selector instead of closing the PSP application.
+
 The PSP backlight turns off ten seconds after pairing to reduce battery use.
 Press SCREEN or HOME to restore it. It is also restored automatically when the
 connection is lost or the application closes. Press HOME to close the PSP
@@ -115,11 +142,11 @@ client.
 ## Windows firewall
 
 Connection Doctor shows `port bound`, `datagram received`, `valid packet`,
-`code matched`, `ACK sent`, and `gamepad created`. It also queries active IPv4
+`auth ready`, `ACK sent`, and `gamepad created`. It also queries active IPv4
 interfaces, network profiles and the matching Windows firewall rule. If it
-stops at `port bound`, check the Windows Private network profile, firewall,
-matching UDP port, client isolation and whether broadcast traffic can reach
-the PC interface.
+stops at `port bound` in Wi-Fi mode, check the Windows Private network profile,
+firewall, matching UDP port, client isolation and whether broadcast traffic
+can reach the PC interface. USB does not use the pairing code or UDP path.
 
 Windows normally asks for private-network access on first launch. If it does
 not, run this command in an administrator PowerShell:
@@ -194,8 +221,9 @@ published by the Release workflow using the matching document from
 
 ## Diagnostics and tests
 
-The GUI includes Connection Doctor 2.0 for network, pairing, packet-health and
-driver failures. The command-line tools remain available for extended runs:
+The GUI includes compact connection diagnostics and a detailed Connection
+Doctor for network, pairing, packet-health and driver failures. The
+command-line tools remain available for extended runs:
 
 ```powershell
 cd pc-server
@@ -220,10 +248,13 @@ The wire format is documented in
 
 ## Security
 
-The pairing code is designed for a trusted home LAN. Input packets are not
+The Wi-Fi pairing code is designed for a trusted home LAN. Input packets are not
 encrypted, and the token is visible to another device capable of capturing
 traffic on that LAN. The protocol must not be exposed directly to the
 Internet.
+
+USB authorization relies on the physical cable and the local WinUSB device
+instead of the typed code. It does not make a remote network transport trusted.
 
 When using legacy WPA-PSK, run the PSP on a dedicated access point or isolated
 SSID, allow peer-to-peer traffic between the PSP and PC, and do not place

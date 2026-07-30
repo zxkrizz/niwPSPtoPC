@@ -22,3 +22,9 @@ device capable of capturing local traffic can recover the session token.
 
 Never forward UDP 47999 through a router and never expose the receiver
 directly to the Internet.
+
+USB mode is authorized by physical access to the connected PSP and does not
+use the Wi-Fi pairing code. It uses the Microsoft-signed inbox WinUSB driver;
+the application must not be distributed with an unsigned replacement kernel
+driver. Treat an unattended, connected PSP and cable as access to the virtual
+controller.

@@ -28,6 +28,7 @@ from .receiver import (
     ReceiverEvent,
     ReceiverSnapshot,
     ReceiverStage,
+    TransportKind,
     UdpReceiver,
 )
 from .single_instance import SingleInstance
@@ -90,7 +91,7 @@ class PixelPspView(tk.Canvas):
         self._axis_text: int
         self._input_text: int
         self._draw()
-        self.set_link_state("PAIRING MODE", "ENTER CODE ON PC")
+        self.set_link_state("WAITING FOR PSP", "USB OR WI-FI")
         self.neutralize()
 
     def _draw(self) -> None:
@@ -541,7 +542,9 @@ class PixelPspView(tk.Canvas):
 class NiwPspToPcApp:
     def __init__(self, root: tk.Tk, *, auto_start: bool = True) -> None:
         self.root = root
-        self.root.title(f"{APP_NAME} — PSP Wi-Fi Controller")
+        self.root.title(
+            f"{APP_NAME} — Ultimate Wireless and Wired Gamepad"
+        )
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
         width = min(1120, max(720, screen_width - 80))
@@ -571,11 +574,14 @@ class NiwPspToPcApp:
         self._restart_pending = False
         self._compact_layout = False
         self._short_layout = False
+        self._wifi_options_open = False
+        self._selected_transport = TransportKind.USB
+        self._connected_transport: TransportKind | None = None
 
         self.code_var = tk.StringVar()
-        self.status_var = tk.StringVar(value="BOOTING RECEIVER…")
+        self.status_var = tk.StringVar(value="Starting receiver...")
         self.status_detail_var = tk.StringVar(
-            value="The pairing code field will be ready in a moment."
+            value="Choose USB or Wi-Fi to connect your PSP."
         )
         self.gamepad_var = tk.StringVar(value="OFFLINE")
 
@@ -640,17 +646,17 @@ class NiwPspToPcApp:
         self._footer.pack(fill="x", pady=(12, 0))
         tk.Label(
             self._footer,
-            text="PSP 1000-GO  //  ONE ANALOG  //  XINPUT",
+            text="PSP 1000–GO   •   XInput controller",
             bg=COLOR_BG,
             fg=COLOR_MUTED,
-            font=(PIXEL_FONT, 8, "bold"),
+            font=("Segoe UI", 8),
         ).pack(side="left")
         tk.Label(
             self._footer,
-            text="HOME NETWORK TOOL",
+            text="Local USB and Wi-Fi connection",
             bg=COLOR_BG,
             fg=COLOR_BORDER,
-            font=(PIXEL_FONT, 8, "bold"),
+            font=("Segoe UI", 8),
         ).pack(side="right")
 
     def _on_window_resize(self, event: tk.Event[tk.Misc]) -> None:
@@ -679,23 +685,12 @@ class NiwPspToPcApp:
         self._short_layout = short
         if short:
             self._link_status_caption.pack_forget()
-            self._pair_section_label.pack_forget()
-            self._pair_help_label.pack_forget()
             self._gamepad_panel.pack_forget()
             self._footer.pack_forget()
         else:
             self._link_status_caption.pack(
                 anchor="w",
                 before=self._status_row,
-            )
-            self._pair_section_label.pack(
-                anchor="w",
-                before=self.code_entry,
-            )
-            self._pair_help_label.pack(
-                anchor="w",
-                pady=(6, 11),
-                before=self.code_entry,
             )
             self._gamepad_panel.pack(
                 fill="x",
@@ -737,10 +732,10 @@ class NiwPspToPcApp:
         ).pack(anchor="w")
         tk.Label(
             title,
-            text="PSP WI-FI CONTROLLER // DESKTOP LINK",
+            text="Use your PSP as a wired or wireless controller",
             bg=COLOR_BG,
             fg=COLOR_MUTED,
-            font=(PIXEL_FONT, 8, "bold"),
+            font=("Segoe UI", 9),
         ).pack(anchor="w", pady=(4, 0))
 
         version = tk.Frame(
@@ -761,7 +756,7 @@ class NiwPspToPcApp:
         ).pack()
         tk.Button(
             header,
-            text="SETTINGS",
+            text="Settings",
             command=self.open_settings,
             bg=COLOR_PANEL_LIGHT,
             fg=COLOR_TEXT,
@@ -772,24 +767,68 @@ class NiwPspToPcApp:
             padx=12,
             pady=8,
             cursor="hand2",
-            font=(PIXEL_FONT, 8, "bold"),
+            font=("Segoe UI", 9, "bold"),
         ).pack(side="right", padx=(0, 8))
 
     def _build_pairing_card(self, master: tk.Misc) -> None:
         body = tk.Frame(master, bg=COLOR_PANEL)
         body.pack(fill="both", expand=True, padx=24, pady=16)
 
-        self._link_status_caption = tk.Label(
+        tk.Label(
             body,
-            text="LINK STATUS",
+            text="Connection",
+            bg=COLOR_PANEL,
+            fg=COLOR_TEXT,
+            font=("Segoe UI", 11, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            body,
+            text="Choose how this PC should connect to your PSP.",
             bg=COLOR_PANEL,
             fg=COLOR_MUTED,
-            font=(PIXEL_FONT, 8, "bold"),
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", pady=(2, 9))
+
+        transport_row = tk.Frame(body, bg=COLOR_PANEL)
+        transport_row.pack(fill="x")
+        transport_row.grid_columnconfigure(0, weight=1, uniform="transport")
+        transport_row.grid_columnconfigure(1, weight=1, uniform="transport")
+        self.usb_mode_button = tk.Button(
+            transport_row,
+            text="USB",
+            command=lambda: self.select_transport(TransportKind.USB),
+            relief="flat",
+            bd=0,
+            pady=14,
+            cursor="hand2",
+            font=("Segoe UI", 13, "bold"),
+        )
+        self.usb_mode_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.wifi_mode_button = tk.Button(
+            transport_row,
+            text="Wi-Fi",
+            command=lambda: self.select_transport(TransportKind.WIFI),
+            relief="flat",
+            bd=0,
+            pady=14,
+            cursor="hand2",
+            font=("Segoe UI", 13, "bold"),
+        )
+        self.wifi_mode_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+
+        tk.Frame(body, bg=COLOR_BORDER, height=1).pack(fill="x", pady=12)
+
+        self._link_status_caption = tk.Label(
+            body,
+            text="Status",
+            bg=COLOR_PANEL,
+            fg=COLOR_MUTED,
+            font=("Segoe UI", 9, "bold"),
         )
         self._link_status_caption.pack(anchor="w")
 
         self._status_row = tk.Frame(body, bg=COLOR_PANEL_LIGHT)
-        self._status_row.pack(fill="x", pady=(9, 0))
+        self._status_row.pack(fill="x", pady=(7, 0))
         self.status_dot = tk.Canvas(
             self._status_row,
             width=26,
@@ -813,7 +852,7 @@ class NiwPspToPcApp:
             textvariable=self.status_var,
             bg=COLOR_PANEL_LIGHT,
             fg=COLOR_TEXT,
-            font=(PIXEL_FONT, 9, "bold"),
+            font=("Segoe UI", 10, "bold"),
         ).pack(anchor="w")
         tk.Label(
             status_text,
@@ -825,28 +864,78 @@ class NiwPspToPcApp:
             font=("Segoe UI", 9),
         ).pack(anchor="w", pady=(3, 0))
 
-        tk.Frame(body, bg=COLOR_BORDER, height=2).pack(fill="x", pady=12)
+        self._connection_host = tk.Frame(body, bg=COLOR_PANEL)
+        self._connection_host.pack(fill="x", pady=(14, 0))
+        self._connection_frames: list[tk.Frame] = []
 
-        self._pair_section_label = tk.Label(
-            body,
-            text="01 // PAIR DEVICE",
-            bg=COLOR_PANEL,
-            fg=COLOR_ACCENT,
-            font=(PIXEL_FONT, 9, "bold"),
-        )
-        self._pair_section_label.pack(anchor="w")
-        self._pair_help_label = tk.Label(
-            body,
-            text="Enter the code displayed on the PSP.",
+        self._usb_setup_frame = tk.Frame(self._connection_host, bg=COLOR_PANEL)
+        self._connection_frames.append(self._usb_setup_frame)
+        tk.Label(
+            self._usb_setup_frame,
+            text="Connect over USB",
             bg=COLOR_PANEL,
             fg=COLOR_TEXT,
-            font=("Segoe UI", 10),
+            font=("Segoe UI", 12, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            self._usb_setup_frame,
+            text=(
+                "Connect a USB data cable to your PSP, then launch "
+                "niwPSPtoPC on the console. No pairing code is needed."
+            ),
+            bg=COLOR_PANEL,
+            fg=COLOR_MUTED,
+            justify="left",
+            wraplength=350,
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", pady=(5, 10))
+        usb_waiting = tk.Frame(
+            self._usb_setup_frame,
+            bg=COLOR_SCREEN,
+            highlightbackground=COLOR_BORDER,
+            highlightthickness=1,
         )
-        self._pair_help_label.pack(anchor="w", pady=(6, 11))
+        usb_waiting.pack(fill="x")
+        tk.Label(
+            usb_waiting,
+            text="Waiting for a PSP over USB",
+            bg=COLOR_SCREEN,
+            fg=COLOR_ACCENT,
+            font=("Segoe UI", 10, "bold"),
+        ).pack(anchor="w", padx=12, pady=(10, 2))
+        tk.Label(
+            usb_waiting,
+            text="You can start the Windows app or the PSP app first.",
+            bg=COLOR_SCREEN,
+            fg=COLOR_MUTED,
+            font=("Segoe UI", 8),
+        ).pack(anchor="w", padx=12, pady=(0, 10))
+
+        self._wifi_setup_frame = tk.Frame(self._connection_host, bg=COLOR_PANEL)
+        self._connection_frames.append(self._wifi_setup_frame)
+        tk.Label(
+            self._wifi_setup_frame,
+            text="Connect over Wi-Fi",
+            bg=COLOR_PANEL,
+            fg=COLOR_TEXT,
+            font=("Segoe UI", 12, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            self._wifi_setup_frame,
+            text=(
+                "Choose Wi-Fi on the PSP, then enter the five-character "
+                "code shown on its screen."
+            ),
+            bg=COLOR_PANEL,
+            fg=COLOR_MUTED,
+            justify="left",
+            wraplength=350,
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", pady=(5, 9))
 
         validate = (self.root.register(self._validate_code_entry), "%P")
         self.code_entry = tk.Entry(
-            body,
+            self._wifi_setup_frame,
             textvariable=self.code_var,
             bg=COLOR_SCREEN,
             fg=COLOR_ACCENT,
@@ -867,8 +956,8 @@ class NiwPspToPcApp:
         self.code_entry.bind("<Return>", lambda _event: self.authorize())
 
         self.pair_button = tk.Button(
-            body,
-            text="[ CONNECT PSP ]",
+            self._wifi_setup_frame,
+            text="Connect over Wi-Fi",
             command=self.authorize,
             bg=COLOR_ACCENT,
             fg=COLOR_INK,
@@ -879,14 +968,16 @@ class NiwPspToPcApp:
             padx=18,
             pady=9,
             cursor="hand2",
-            font=(PIXEL_FONT, 9, "bold"),
+            font=("Segoe UI", 10, "bold"),
         )
         self.pair_button.pack(fill="x", pady=(8, 0))
 
-        self.change_button = tk.Button(
-            body,
-            text="USE ANOTHER CODE",
-            command=self.clear_pairing,
+        self._connected_frame = tk.Frame(self._connection_host, bg=COLOR_PANEL)
+        self._connection_frames.append(self._connected_frame)
+        self.disconnect_button = tk.Button(
+            self._connected_frame,
+            text="Disconnect",
+            command=self.disconnect_current,
             bg=COLOR_PANEL_LIGHT,
             fg=COLOR_TEXT,
             activebackground=COLOR_BORDER,
@@ -894,83 +985,45 @@ class NiwPspToPcApp:
             relief="flat",
             bd=0,
             padx=18,
-            pady=7,
+            pady=9,
             cursor="hand2",
-            font=(PIXEL_FONT, 8, "bold"),
+            font=("Segoe UI", 10, "bold"),
         )
-        self.change_button.pack(fill="x", pady=(6, 0))
+        self.disconnect_button.pack(fill="x")
 
-        doctor = tk.Frame(body, bg=COLOR_PANEL)
-        doctor.pack(fill="x", pady=(8, 5))
-        doctor.grid_columnconfigure(0, weight=1)
-        doctor.grid_columnconfigure(1, weight=1)
+        doctor = tk.Frame(body, bg=COLOR_PANEL_LIGHT)
+        doctor.pack(fill="x", pady=(12, 5))
         tk.Label(
             doctor,
-            text="CONNECTION DOCTOR",
-            bg=COLOR_PANEL,
-            fg=COLOR_BLUE,
-            font=(PIXEL_FONT, 8, "bold"),
-        ).grid(row=0, column=0, columnspan=2, sticky="w")
-        for index, (stage, complete) in enumerate(self._doctor.rows()):
-            label = tk.Label(
-                doctor,
-                text=f"[{'OK' if complete else '--'}] {stage}",
-                bg=COLOR_PANEL,
-                fg=COLOR_MUTED,
-                font=(PIXEL_FONT, 7, "bold"),
-            )
-            label.grid(
-                row=1 + index // 2,
-                column=index % 2,
-                sticky="w",
-                pady=(2, 0),
-            )
-            self._doctor_row_labels.append(label)
+            text="Diagnostics",
+            bg=COLOR_PANEL_LIGHT,
+            fg=COLOR_TEXT,
+            font=("Segoe UI", 8, "bold"),
+        ).pack(side="left", padx=(10, 6), pady=8)
         self.doctor_detail_var = tk.StringVar()
-        self.doctor_metrics_var = tk.StringVar(value="UDP: waiting for data")
+        self.doctor_metrics_var = tk.StringVar(value="Waiting for input")
         tk.Label(
             doctor,
             textvariable=self.doctor_metrics_var,
-            bg=COLOR_PANEL,
-            fg=COLOR_BLUE,
-            justify="left",
-            font=(PIXEL_FONT, 7, "bold"),
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        tk.Label(
-            doctor,
-            textvariable=self.doctor_detail_var,
-            bg=COLOR_PANEL,
+            bg=COLOR_PANEL_LIGHT,
             fg=COLOR_MUTED,
-            justify="left",
-            wraplength=350,
             font=("Segoe UI", 7),
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(3, 0))
+        ).pack(side="left", fill="x", expand=True, pady=8)
         tk.Button(
             doctor,
-            text="OPEN DOCTOR 2.0",
+            text="Details",
             command=self.open_doctor,
-            bg=COLOR_PANEL_LIGHT,
-            fg=COLOR_BLUE,
-            activebackground=COLOR_BORDER,
-            activeforeground=COLOR_TEXT,
-            relief="flat",
-            bd=0,
-            cursor="hand2",
-            font=(PIXEL_FONT, 7, "bold"),
-        ).grid(row=6, column=0, sticky="ew", padx=(0, 3), pady=(5, 0))
-        tk.Button(
-            doctor,
-            text="COPY REPORT",
-            command=self.copy_diagnostic_report,
-            bg=COLOR_PANEL_LIGHT,
+            bg=COLOR_BORDER,
             fg=COLOR_ACCENT,
             activebackground=COLOR_BORDER,
             activeforeground=COLOR_TEXT,
             relief="flat",
             bd=0,
+            padx=10,
+            pady=3,
             cursor="hand2",
-            font=(PIXEL_FONT, 7, "bold"),
-        ).grid(row=6, column=1, sticky="ew", padx=(3, 0), pady=(5, 0))
+            font=("Segoe UI", 8),
+        ).pack(side="right", padx=5, pady=5)
         self._refresh_doctor()
 
         self._gamepad_panel = tk.Frame(
@@ -982,21 +1035,21 @@ class NiwPspToPcApp:
         self._gamepad_panel.pack(fill="x", side="bottom", pady=(5, 0))
         tk.Label(
             self._gamepad_panel,
-            text="VIRTUAL PAD",
+            text="Virtual controller",
             bg=COLOR_SCREEN,
             fg=COLOR_MUTED,
-            font=(PIXEL_FONT, 8, "bold"),
+            font=("Segoe UI", 9),
         ).pack(side="left", padx=12, pady=11)
         tk.Label(
             self._gamepad_panel,
             textvariable=self.gamepad_var,
             bg=COLOR_SCREEN,
             fg=COLOR_ACCENT,
-            font=(PIXEL_FONT, 8, "bold"),
+            font=("Segoe UI", 9, "bold"),
         ).pack(side="right", padx=12, pady=11)
         self.retry_gamepad_button = tk.Button(
             self._gamepad_panel,
-            text="RETRY GAMEPAD",
+            text="Retry",
             command=self.retry_gamepad,
             bg=COLOR_PANEL_LIGHT,
             fg=COLOR_WARN,
@@ -1005,9 +1058,149 @@ class NiwPspToPcApp:
             relief="flat",
             bd=0,
             cursor="hand2",
-            font=(PIXEL_FONT, 7, "bold"),
+            font=("Segoe UI", 8),
         )
         self.retry_gamepad_button.pack(side="right", padx=(4, 0), pady=7)
+        self._refresh_transport_selector()
+        self._render_connection_panel()
+
+    @staticmethod
+    def _transport_label(transport: TransportKind) -> str:
+        return "USB" if transport is TransportKind.USB else "Wi-Fi"
+
+    def _refresh_transport_selector(self) -> None:
+        selected = self._selected_transport
+        for transport, attribute in (
+            (TransportKind.USB, "usb_mode_button"),
+            (TransportKind.WIFI, "wifi_mode_button"),
+        ):
+            button = getattr(self, attribute, None)
+            if button is None:
+                continue
+            active = transport is selected
+            button.configure(
+                bg=COLOR_ACCENT if active else COLOR_PANEL_LIGHT,
+                fg=COLOR_INK if active else COLOR_TEXT,
+                activebackground=COLOR_TEXT if active else COLOR_BORDER,
+                activeforeground=COLOR_INK if active else COLOR_TEXT,
+                highlightthickness=1,
+                highlightbackground=(
+                    COLOR_ACCENT if active else COLOR_BORDER
+                ),
+            )
+
+    def _show_connection_frame(self, selected_frame: tk.Frame) -> None:
+        for frame in getattr(self, "_connection_frames", []):
+            frame.pack_forget()
+        selected_frame.pack(fill="x")
+
+    def _render_connection_panel(self) -> None:
+        if not hasattr(self, "_connection_frames"):
+            return
+        if self._connected_transport is self._selected_transport:
+            self._show_connection_frame(self._connected_frame)
+        elif self._selected_transport is TransportKind.USB:
+            self._show_connection_frame(self._usb_setup_frame)
+        else:
+            self._show_connection_frame(self._wifi_setup_frame)
+
+    def select_transport(self, transport: TransportKind) -> None:
+        self._selected_transport = transport
+        self._wifi_options_open = transport is TransportKind.WIFI
+        receiver = self._receiver
+        if receiver is not None:
+            receiver.allow_transport(transport)
+        self._refresh_transport_selector()
+        self._render_connection_panel()
+
+        connected = self._connected_transport
+        if connected is transport:
+            label = self._transport_label(transport)
+            self._set_status(
+                f"Connected over {label}",
+                "Your PSP is ready to use.",
+                COLOR_ACCENT,
+            )
+            return
+        if connected is not None:
+            connected_label = self._transport_label(connected)
+            selected_label = self._transport_label(transport)
+            self._set_status(
+                f"Connected over {connected_label}",
+                (
+                    f"{selected_label} is selected. Choose the same "
+                    "transport on your PSP when you are ready."
+                ),
+                COLOR_BLUE,
+            )
+        elif transport is TransportKind.USB:
+            self._set_status(
+                "Waiting for USB",
+                "Connect the cable and launch niwPSPtoPC on your PSP.",
+                COLOR_BLUE,
+            )
+            self.controller_view.set_link_state(
+                "WAITING FOR PSP",
+                "USB CONNECTION",
+            )
+        else:
+            self._set_status(
+                "Wi-Fi setup",
+                "Enter the five-character code shown on your PSP.",
+                COLOR_BLUE,
+            )
+            self.controller_view.set_link_state(
+                "PAIRING MODE",
+                "ENTER WI-FI CODE",
+            )
+            self.code_entry.focus_set()
+
+    def show_wifi_options(self) -> None:
+        self.select_transport(TransportKind.WIFI)
+
+    def show_usb_hint(self) -> None:
+        self.select_transport(TransportKind.USB)
+
+    def disconnect_current(self) -> None:
+        transport = self._connected_transport
+        if transport is None:
+            return
+        receiver = self._receiver
+        if receiver is not None:
+            if transport is TransportKind.WIFI:
+                receiver.set_pairing_token(None)
+            else:
+                receiver.disconnect_active_client()
+        if transport is TransportKind.WIFI:
+            self._active_token = None
+            self.code_var.set("")
+        self._paired_address = None
+        self._connected_transport = None
+        self.controller_view.neutralize()
+        self.controller_view.set_link_state(
+            "WAITING FOR PSP",
+            f"{self._transport_label(transport).upper()} DISCONNECTED",
+        )
+        if self._controller_service is not None:
+            self._controller_service.disconnect("user-disconnected")
+        self.gamepad_var.set(
+            "READY"
+            if self._controller_service is not None
+            and getattr(self._controller_service, "gamepad_ready", False)
+            else "OFFLINE"
+        )
+        self._doctor.reset_pairing()
+        self._refresh_doctor()
+        self._render_connection_panel()
+        self._set_status(
+            "Disconnected",
+            (
+                "Enter the Wi-Fi code again when you want to reconnect."
+                if transport is TransportKind.WIFI
+                else "Select USB again or reconnect the cable to continue."
+            ),
+            COLOR_WARN,
+        )
 
     @staticmethod
     def _normalize_code_text(value: str) -> str:
@@ -1038,7 +1231,7 @@ class NiwPspToPcApp:
             rows,
         ):
             label.configure(
-                text=f"[{'OK' if complete else '--'}] {stage}",
+                text=f"{'✓' if complete else '○'}  {stage.title()}",
                 fg=COLOR_ACCENT if complete else COLOR_MUTED,
             )
         if hasattr(self, "doctor_detail_var"):
@@ -1053,10 +1246,10 @@ class NiwPspToPcApp:
                 else "never"
             )
             self.doctor_metrics_var.set(
-                f"UDP {metrics.valid_packets} OK / "
-                f"{metrics.rejected_datagrams} REJECTED  //  "
-                f"{metrics.packets_per_second:.0f} HZ  //  "
-                f"LOSS {metrics.loss_percent:.1f}%  //  LAST {age}"
+                f"{metrics.valid_packets} valid • "
+                f"{metrics.rejected_datagrams} rejected • "
+                f"{metrics.packets_per_second:.0f} Hz • "
+                f"{metrics.loss_percent:.1f}% loss • last {age}"
             )
         self._update_doctor_window()
 
@@ -1342,6 +1535,7 @@ class NiwPspToPcApp:
             allowed_hosts=set(settings.allowed_hosts) or None,
             pairing_token=self._active_token,
             require_pairing=True,
+            enable_usb=True,
         )
         self._receiver = receiver
         controller_service.ensure_backend()
@@ -1359,7 +1553,7 @@ class NiwPspToPcApp:
 
         self._receiver_thread = threading.Thread(
             target=worker,
-            name="niwPSPtoPC UDP receiver",
+            name="niwPSPtoPC USB + Wi-Fi receiver",
             daemon=True,
         )
         self._receiver_thread.start()
@@ -1368,38 +1562,56 @@ class NiwPspToPcApp:
         try:
             token = parse_pairing_token(self.code_var.get())
         except ValueError as exc:
-            self._set_status("CHECK CODE", str(exc), COLOR_DANGER)
+            self._set_status("Check the code", str(exc), COLOR_DANGER)
             self.code_entry.focus_set()
             return
 
+        usb_active = self._connected_transport is TransportKind.USB
+        self._selected_transport = TransportKind.WIFI
+        self._wifi_options_open = True
         self._active_token = token
         self._doctor.reset_pairing()
         self._refresh_doctor()
         self.code_var.set(format_pairing_token(token))
-        self._paired_address = None
+        if not usb_active:
+            self._paired_address = None
         self.gamepad_var.set(
             "READY"
             if self._controller_service is not None
             and getattr(self._controller_service, "gamepad_ready", False)
             else "OFFLINE"
         )
-        self.controller_view.neutralize()
-        self.controller_view.set_link_state("SEARCHING PSP", "CODE ACCEPTED")
-        if self._controller_service is not None:
-            self._controller_service.disconnect("pairing-changed")
+        if not usb_active:
+            self.controller_view.neutralize()
+            self.controller_view.set_link_state(
+                "SEARCHING PSP",
+                "WI-FI CODE ACCEPTED",
+            )
+            if self._controller_service is not None:
+                self._controller_service.disconnect("pairing-changed")
         if self._receiver is not None:
             self._receiver.set_pairing_token(token)
+        self._refresh_transport_selector()
+        self._render_connection_panel()
         self._set_status(
-            "WAITING FOR PSP",
-            "Code saved. The console will discover this PC automatically.",
-            COLOR_BLUE,
+            "Connected over USB" if usb_active else "Waiting for Wi-Fi",
+            (
+                "USB remains active. Switch to Wi-Fi on the PSP when ready."
+                if usb_active
+                else "Code saved. Waiting for your PSP to connect."
+            ),
+            COLOR_ACCENT if usb_active else COLOR_BLUE,
         )
 
     def clear_pairing(self) -> None:
+        if self._connected_transport is TransportKind.WIFI:
+            self.disconnect_current()
+            return
+        self._wifi_options_open = True
+        self._selected_transport = TransportKind.WIFI
         self._active_token = None
         self._doctor.reset_pairing()
         self._refresh_doctor()
-        self._paired_address = None
         self.code_var.set("")
         self.gamepad_var.set(
             "READY"
@@ -1407,15 +1619,22 @@ class NiwPspToPcApp:
             and getattr(self._controller_service, "gamepad_ready", False)
             else "OFFLINE"
         )
-        self.controller_view.neutralize()
-        self.controller_view.set_link_state("PAIRING MODE", "ENTER CODE ON PC")
-        if self._controller_service is not None:
-            self._controller_service.disconnect("pairing-cleared")
+        if self._connected_transport is not TransportKind.USB:
+            self._paired_address = None
+            self.controller_view.neutralize()
+            self.controller_view.set_link_state(
+                "PAIRING MODE",
+                "ENTER WI-FI CODE",
+            )
+            if self._controller_service is not None:
+                self._controller_service.disconnect("pairing-cleared")
         if self._receiver is not None:
             self._receiver.set_pairing_token(None)
+        self._refresh_transport_selector()
+        self._render_connection_panel()
         self._set_status(
-            "ENTER PSP CODE",
-            "The console creates a new code every time it starts.",
+            "Enter the Wi-Fi code",
+            "Use the five-character code currently shown on your PSP.",
             COLOR_BLUE,
         )
         self.code_entry.focus_set()
@@ -1428,12 +1647,21 @@ class NiwPspToPcApp:
                     address = payload
                     if isinstance(address, tuple):
                         self._doctor.set_bound_address(address)
-                    self._set_status(
-                        "ENTER PSP CODE",
-                        "The receiver is ready.",
-                        COLOR_BLUE,
-                    )
-                    self.code_entry.focus_set()
+                    if self._connected_transport is not None:
+                        pass
+                    elif self._selected_transport is TransportKind.WIFI:
+                        self._set_status(
+                            "Wi-Fi setup",
+                            "Enter the five-character code shown on your PSP.",
+                            COLOR_BLUE,
+                        )
+                        self.code_entry.focus_set()
+                    else:
+                        self._set_status(
+                            "Waiting for USB",
+                            "Connect the cable and launch the app on your PSP.",
+                            COLOR_BLUE,
+                        )
                 elif kind == "stage":
                     self._apply_receiver_stage(payload)  # type: ignore[arg-type]
                 elif kind == "packet":
@@ -1473,12 +1701,18 @@ class NiwPspToPcApp:
 
     def _apply_snapshot(self, snapshot: ReceiverSnapshot) -> None:
         self._paired_address = snapshot.address
+        self._connected_transport = snapshot.transport
+        self._selected_transport = snapshot.transport
+        self._wifi_options_open = snapshot.transport is TransportKind.WIFI
+        self._refresh_transport_selector()
+        self._render_connection_panel()
         self.controller_view.set_packet(snapshot.packet)
         self.controller_view.set_input_rate(snapshot.packets_per_second)
         self.controller_view.set_link_state("LINK ACTIVE", "CONTROLLER READY")
+        label = self._transport_label(snapshot.transport)
         self._set_status(
-            "PSP CONNECTED",
-            "The controller is ready to play.",
+            f"Connected over {label}",
+            "Your PSP is ready to use as an Xbox controller.",
             COLOR_ACCENT,
         )
 
@@ -1502,8 +1736,8 @@ class NiwPspToPcApp:
                     "CONTROLS RELEASED",
                 )
                 self._set_status(
-                    "SIGNAL PAUSED",
-                    "Input is neutral; the PSP session remains reserved briefly.",
+                    "Input paused",
+                    "Controls were released while waiting for fresh input.",
                     COLOR_WARN,
                 )
             return
@@ -1551,6 +1785,9 @@ class NiwPspToPcApp:
                 COLOR_DANGER,
             )
         elif event.reason == "timeout" and self._running:
+            self._paired_address = None
+            self._connected_transport = None
+            self._render_connection_panel()
             self.gamepad_var.set(
                 "READY"
                 if self._controller_service is not None
@@ -1559,8 +1796,12 @@ class NiwPspToPcApp:
             )
             self.controller_view.set_link_state("SIGNAL LOST", "WAITING FOR PSP")
             self._set_status(
-                "CONNECTION LOST",
-                "All controls were released. Waiting for the PSP.",
+                "Connection lost",
+                (
+                    "Waiting for the USB connection."
+                    if self._selected_transport is TransportKind.USB
+                    else "Waiting for your PSP over Wi-Fi."
+                ),
                 COLOR_WARN,
             )
 
@@ -1574,6 +1815,16 @@ class NiwPspToPcApp:
         }
         self._doctor.mark(mapping[event.stage])
         self._refresh_doctor()
+        if (
+            event.transport.value == "usb"
+            and event.stage is ReceiverStage.DATAGRAM_RECEIVED
+            and self._paired_address != ("usb", 0)
+        ):
+            self._set_status(
+                "USB device detected",
+                "Preparing the virtual controller. No code is required.",
+                COLOR_BLUE,
+            )
 
     def close(self) -> None:
         self._closing = True
@@ -1586,6 +1837,15 @@ class NiwPspToPcApp:
 
 
 def main() -> int:
+    if "--repair-winusb" in sys.argv[1:]:
+        from .winusb_setup import (
+            repair_winusb_interfaces,
+            write_repair_report,
+        )
+
+        result = repair_winusb_interfaces()
+        write_repair_report(result)
+        return 0 if result.succeeded else 1
     smoke_test = (
         "--smoke-test" in sys.argv[1:]
         or os.environ.get("NIWPSPTOPC_SMOKE_TEST") == "1"

@@ -1,0 +1,210 @@
+diff --git a/usbhostfs/main.c b/usbhostfs/main.c
+index 8d65025..94e5bc4 100644
+--- a/usbhostfs/main.c
++++ b/usbhostfs/main.c
+@@ -79,7 +79,7 @@ struct DeviceDescriptor devdesc_hi =
+ 	.idVendor = 0, 
+ 	.idProduct = 0, 
+-	.bcdDevice = 0x100, 
++	.bcdDevice = 0x102,
+ 	.iManufacturer = 0, 
+ 	.iProduct = 0, 
+ 	.iSerialNumber = 0,
+@@ -105,7 +105,7 @@ struct InterfaceDescriptor interdesc_hi =
+ 	.bInterfaceClass = 0xFF, 
+ 	.bInterfaceSubClass = 0x1, 
+ 	.bInterfaceProtocol = 0xFF, 
+-	.iInterface = 1
++	.iInterface = 0
+ };
+ 
+ /* Hi-Speed endpoint descriptors */
+@@ -141,7 +141,7 @@ struct DeviceDescriptor devdesc_full =
+ 	.idVendor = 0, 
+ 	.idProduct = 0, 
+-	.bcdDevice = 0x100, 
++	.bcdDevice = 0x102,
+ 	.iManufacturer = 0, 
+ 	.iProduct = 0, 
+ 	.iSerialNumber = 0,
+@@ -167,7 +167,7 @@ struct InterfaceDescriptor interdesc_full =
+ 	.bInterfaceClass = 0xFF, 
+ 	.bInterfaceSubClass = 0x1, 
+ 	.bInterfaceProtocol = 0xFF, 
+-	.iInterface = 1
++	.iInterface = 0
+ };
+ 
+ /* Full-Speed endpoint descriptors */
+@@ -212,16 +212,121 @@ struct EndpointDescriptor endpdesc_full[3] =
+ 	},
+ };
+ 
+-/* String descriptor */
++/*
++ * Microsoft OS 1.0 string descriptor. Windows requests index 0xEE during
++ * first-time enumeration and uses vendor code 0x21 for the feature
++ * descriptors below. Reporting WINUSB lets Windows 8 and newer bind its
++ * inbox, Microsoft-signed WinUSB driver without a custom INF package.
++ */
+ unsigned char strp[] = 
+ {
+-	0x8, 0x3, '<', 0, '>', 0, 0, 0
++	0x12, 0x03,
++	'M', 0, 'S', 0, 'F', 0, 'T', 0, '1', 0, '0', 0, '0', 0,
++	0x21, 0x00
+ };
++_Static_assert(sizeof(strp) == 18,
++	"Microsoft OS string descriptor must be 18 bytes");
+ 
++/* Extended compatible ID descriptor: interface 0 is a WINUSB function. */
++static unsigned char winusb_compatible_id[] __attribute__((aligned(64))) =
++{
++	0x28, 0x00, 0x00, 0x00, /* dwLength = 40 */
++	0x00, 0x01,             /* bcdVersion = 1.00 */
++	0x04, 0x00,             /* wIndex = compatible ID */
++	0x01,                   /* bCount */
++	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++	0x00,                   /* bFirstInterfaceNumber */
++	0x01,                   /* reserved */
++	'W', 'I', 'N', 'U', 'S', 'B', 0x00, 0x00,
++	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++	0x00, 0x00, 0x00, 0x00, 0x00, 0x00
++};
++_Static_assert(sizeof(winusb_compatible_id) == 40,
++	"WINUSB compatible ID descriptor must be 40 bytes");
++
++/*
++ * Extended properties descriptor. Registering a stable
++ * DeviceInterfaceGUID lets desktop applications and libusb locate the
++ * automatic WinUSB interface without an installer-created registry entry.
++ * GUID: {25B21F00-3140-49D7-9625-1F109B77ECFA}
++ */
++static unsigned char winusb_extended_properties[] __attribute__((aligned(64))) =
++{
++	0x8E, 0x00, 0x00, 0x00, /* dwLength = 142 */
++	0x00, 0x01,             /* bcdVersion = 1.00 */
++	0x05, 0x00,             /* wIndex = extended properties */
++	0x01, 0x00,             /* wCount */
++	0x84, 0x00, 0x00, 0x00, /* dwSize = 132 */
++	0x01, 0x00, 0x00, 0x00, /* REG_SZ */
++	0x28, 0x00,             /* property name = 40 bytes */
++	'D', 0, 'e', 0, 'v', 0, 'i', 0, 'c', 0, 'e', 0,
++	'I', 0, 'n', 0, 't', 0, 'e', 0, 'r', 0, 'f', 0, 'a', 0,
++	'c', 0, 'e', 0, 'G', 0, 'U', 0, 'I', 0, 'D', 0, 0, 0,
++	0x4E, 0x00, 0x00, 0x00, /* property data = 78 bytes */
++	'{', 0, '2', 0, '5', 0, 'B', 0, '2', 0, '1', 0, 'F', 0,
++	'0', 0, '0', 0, '-', 0, '3', 0, '1', 0, '4', 0, '0', 0,
++	'-', 0, '4', 0, '9', 0, 'D', 0, '7', 0, '-', 0, '9', 0,
++	'6', 0, '2', 0, '5', 0, '-', 0, '1', 0, 'F', 0, '1', 0,
++	'0', 0, '9', 0, 'B', 0, '7', 0, '7', 0, 'E', 0, 'C', 0,
++	'F', 0, 'A', 0, '}', 0, 0, 0
++};
++_Static_assert(sizeof(winusb_extended_properties) == 142,
++	"WINUSB extended properties descriptor must be 142 bytes");
++
+ /* Endpoint blocks */
+ struct UsbEndpoint endp[4] = {
+ 	{ 0, 0, 0 },
+@@ -230,14 +335,52 @@ struct UsbEndpoint endp[4] = {
+ 	{ 3, 0, 0 },
+ };
+ 
++static struct UsbdDeviceReq control_req;
++static unsigned int winusb_descriptor_debug;
++
+ /* Intefaces */
+ struct UsbInterface intp = {
+ 	0xFFFFFFFF, 0, 1,
+ };
+ 
++static int control_req_done(
++	struct UsbdDeviceReq *req,
++	int arg2,
++	int arg3)
++{
++	(void)req;
++	(void)arg2;
++	(void)arg3;
++	return 0;
++}
++
++static int send_control_response(
++	const unsigned char *data,
++	int size,
++	unsigned short requested_size)
++{
++	if(size > requested_size)
++	{
++		size = requested_size;
++	}
++	sceKernelDcacheWritebackRange(data, size);
++	memset(&control_req, 0, sizeof(control_req));
++	control_req.endp = &endp[0];
++	control_req.data = (void *)data;
++	control_req.size = size;
++	control_req.func = control_req_done;
++	return sceUsbbdReqSend(&control_req);
++}
++
++unsigned int niwUsbGetDescriptorDebug(void)
++{
++	return winusb_descriptor_debug;
++}
++
+ /* Device request */
+ int usb_request(int arg1, int arg2, struct DeviceRequest *req)
+ {
+ 	DEBUG_PRINTF("func24 a1 %08X, a2 %08X, a3 %p\n", arg1, arg2, req);
+ 	DEBUG_PRINTF("ReqType %d, Request %d, Value %x, Index %x, Length %x\n", 
+ 			req->bmRequestType, req->bRequest, req->wValue, req->wIndex,
+ 			req->wLength);
++	winusb_descriptor_debug =
++		(winusb_descriptor_debug & 0xFF) |
++		((unsigned int)req->bmRequestType << 8) |
++		((unsigned int)req->bRequest << 16) |
++		((unsigned int)(req->wIndex & 0xFF) << 24);
++	if((req->bmRequestType == 0xC0 || req->bmRequestType == 0xC1) &&
++		req->bRequest == 0x21 &&
++		req->wValue == 0x0000)
++	{
++		if(req->wIndex == 0x0004)
++		{
++			winusb_descriptor_debug |= 0x02;
++			return send_control_response(winusb_compatible_id,
++				sizeof(winusb_compatible_id), req->wLength);
++		}
++		if(req->wIndex == 0x0005)
++		{
++			winusb_descriptor_debug |= 0x04;
++			return send_control_response(winusb_extended_properties,
++				sizeof(winusb_extended_properties), req->wLength);
++		}
++	}
++	if(req->bmRequestType == 0x80 && req->bRequest == 0x06 &&
++		req->wValue == 0x03EE)
++	{
++		winusb_descriptor_debug |= 0x01;
++		return send_control_response(strp, sizeof(strp), req->wLength);
++	}
+ 	return 0;
+ }
+
+diff --git a/usbhostfs/exports.exp b/usbhostfs/exports.exp
+index d3fc90c..644bef7 100644
+--- a/usbhostfs/exports.exp
++++ b/usbhostfs/exports.exp
+@@ -20,6 +20,7 @@ PSP_EXPORT_FUNC(usbWriteBulkData)
+ PSP_EXPORT_FUNC(usbLockBus)
+ PSP_EXPORT_FUNC(usbUnlockBus)
++PSP_EXPORT_FUNC(niwUsbGetDescriptorDebug)
+ PSP_EXPORT_END
+ 
+ PSP_EXPORT_START(USBHostFS, 0, 0x4001)
+@@ -33,6 +34,7 @@ PSP_EXPORT_FUNC(usbWriteBulkData)
+ PSP_EXPORT_FUNC(usbLockBus)
+ PSP_EXPORT_FUNC(usbUnlockBus)
++PSP_EXPORT_FUNC(niwUsbGetDescriptorDebug)
+ PSP_EXPORT_END
+ 
+ PSP_END_EXPORTS

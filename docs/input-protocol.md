@@ -1,7 +1,7 @@
 # niwPSPtoPC Input Protocol v2
 
 This document is the normative specification for PSP controller input,
-pairing and automatic PC discovery.
+transport authorization and automatic Wi-Fi PC discovery.
 
 ## Encoding rules
 
@@ -32,13 +32,16 @@ uses `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`, omitting visually ambiguous
 characters. Spaces and hyphens entered in the desktop app are ignored.
 Receivers reject a packet whose `reserved` field is not zero.
 
-## Pairing ACK
+## Readiness ACK
 
 The product PC application sends an ACK only after accepting an input packet
-with the configured pairing code and confirming that the virtual-controller
-backend is ready. If the backend is unavailable or an input update fails, ACKs
-are withheld until the backend recovers. This prevents the PSP from reporting
-`CONTROLLER READY` when Windows cannot expose the virtual controller.
+and confirming that the virtual-controller backend is ready. Wi-Fi packets
+must match the code configured in the desktop app. USB packets are accepted
+through the local physical-cable trust boundary without a typed code, and the
+token carried by the packet is echoed in the ACK. If the backend is unavailable
+or an input update fails, ACKs are withheld until it recovers. This prevents
+the PSP from reporting `CONTROLLER READY` when Windows cannot expose the
+virtual controller.
 
 Struct notation: `!IHHI`.
 
@@ -107,8 +110,11 @@ Only FIRST, IN_ORDER and GAP update the virtual controller. DUPLICATE and
 OUT_OF_ORDER stay in diagnostics and never restore an older state. No jitter
 buffer is used.
 
-The first valid paired `IP:port` owns the controller until it is explicitly
-released or times out. Inactive client entries expire.
+The first valid session owns the controller until it is explicitly released or
+times out. The same PSP application session may move between its USB endpoint
+and Wi-Fi `IP:port` after the former transport stops producing input. An
+unrelated client cannot take over through this switching path. Inactive client
+entries expire.
 
 ## Controller safety timeout
 
@@ -152,13 +158,16 @@ and Python decoder test. It contains:
 
 ## Security boundary
 
-The five-character code provides 25 bits of pairing space and prevents
+The five-character Wi-Fi code provides 25 bits of pairing space and prevents
 accidental control by ordinary senders on the same LAN. It is not a
 cryptographic protocol: traffic is unencrypted and the token is present in
 every input packet. A device capable of capturing LAN traffic can recover it.
 
 The protocol is for a trusted home network only. It must not be forwarded or
 exposed to the Internet.
+
+USB mode treats physical access to the connected WinUSB device as
+authorization. It does not use the typed Wi-Fi code.
 
 Existing button meanings must never change. Any wire-layout change must
 increment `version` and update `packet_size`.

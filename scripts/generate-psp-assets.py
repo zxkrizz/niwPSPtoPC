@@ -177,7 +177,7 @@ def create_icon(path: Path) -> None:
     canvas.logo(10, 20, 5)
     canvas.text(58, 14, "NIWPSP", 2, COLORS["text"])
     canvas.text(70, 34, "TO PC", 2, COLORS["accent"])
-    canvas.text(66, 61, "WI FI PAD", 1, COLORS["muted"])
+    canvas.text(62, 61, "USB WIFI PAD", 1, COLORS["muted"])
     canvas.save_png(path)
 
 
@@ -186,17 +186,17 @@ def create_background(path: Path) -> None:
     canvas.grid(16)
     canvas.logo(36, 42, 8)
     canvas.text(120, 52, "NIWPSP TO PC", 4, COLORS["text"])
-    canvas.text(122, 90, "PSP WI FI CONTROLLER", 2, COLORS["accent"])
+    canvas.text(120, 90, "WIRELESS AND WIRED GAMEPAD", 2, COLORS["accent"])
     canvas.panel(36, 150, 408, 70, COLORS["panel"])
     steps = (
-        (54, "PAIR"),
+        (54, "CHOOSE"),
         (180, "CONNECT"),
         (334, "PLAY"),
     )
     for x, label in steps:
         canvas.fill(x, 168, 10, 10, COLORS["accent"])
         canvas.text(x + 18, 166, label, 2, COLORS["text"])
-    canvas.text(150, 240, "HOME NETWORK TOOL", 1, COLORS["muted"])
+    canvas.text(174, 240, "USB OR WI FI", 1, COLORS["muted"])
     canvas.save_png(path)
 
 

@@ -1,4 +1,4 @@
-"""UDP receive loop and sequence/rate tracking."""
+"""Wi-Fi/USB receive loop and shared sequence/rate tracking."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from .protocol import (
     decode_packet,
     encode_pairing_ack,
 )
+from .usb_transport import UsbPacketSource
 
 LOGGER = logging.getLogger(__name__)
 UINT32_MASK = 0xFFFFFFFF
@@ -26,6 +27,7 @@ UINT32_HALF_RANGE = 0x80000000
 MAX_CLOCK_SKEW_US = 5 * 60 * 1_000_000
 DEFAULT_ACTIVE_CLIENT_TIMEOUT_S = 1.75
 DEFAULT_CLIENT_RETENTION_S = 10.0
+TRANSPORT_SWITCH_GRACE_S = 0.15
 PAIRING_ACK_INTERVAL_S = 0.1
 REJECTION_CACHE_MAX_ENTRIES = 128
 REJECTION_CACHE_TTL_S = 10.0
@@ -47,10 +49,16 @@ class ReceiverStage(Enum):
     ACK_SENT = "ack-sent"
 
 
+class TransportKind(Enum):
+    WIFI = "wifi"
+    USB = "usb"
+
+
 @dataclass(frozen=True, slots=True)
 class ReceiverEvent:
     stage: ReceiverStage
     address: tuple[str, int] | None = None
+    transport: TransportKind = TransportKind.WIFI
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +125,8 @@ class ClientState:
     last_seen: float = 0.0
     last_fresh_state: float = 0.0
     inactive_warning_logged: bool = False
+    session_token: int | None = None
+    transport: TransportKind = TransportKind.WIFI
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +144,7 @@ class ReceiverSnapshot:
     out_of_order: int
     is_active_client: bool
     is_state_update: bool
+    transport: TransportKind = TransportKind.WIFI
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +195,11 @@ class UdpReceiver:
         active_client_timeout_s: float = DEFAULT_ACTIVE_CLIENT_TIMEOUT_S,
         client_retention_s: float = DEFAULT_CLIENT_RETENTION_S,
         socket_factory: Callable[..., socket.socket] = socket.socket,
+        enable_usb: bool = False,
+        usb_source_factory: Callable[
+            [Callable[[bytes, Callable[[bytes], None]], None]], UsbPacketSource
+        ]
+        | None = None,
     ) -> None:
         if active_client_timeout_s <= 0:
             raise ValueError("active_client_timeout_s must be positive")
@@ -209,6 +225,10 @@ class UdpReceiver:
         self.active_client_timeout_s = active_client_timeout_s
         self.client_retention_s = client_retention_s
         self._socket_factory = socket_factory
+        self.enable_usb = enable_usb
+        self._usb_source_factory = usb_source_factory
+        self._usb_source: UsbPacketSource | None = None
+        self._usb_thread: threading.Thread | None = None
         self._clients: dict[tuple[str, int], ClientState] = {}
         self._active_client: tuple[str, int] | None = None
         self._blocked_clients: set[tuple[str, int]] = set()
@@ -311,16 +331,23 @@ class UdpReceiver:
             )
 
     def set_pairing_token(self, pairing_token: int | None) -> None:
-        """Replace the authorized session and forget all previous clients."""
+        """Replace Wi-Fi authorization without interrupting a USB session."""
         if pairing_token is not None and not 0 <= pairing_token <= PAIRING_TOKEN_MAX:
             raise ValueError("pairing_token must be an unsigned 25-bit integer")
         with self._clients_lock:
             self._pairing_token = pairing_token
-            self._clients.clear()
-            self._active_client = None
-            self._blocked_clients.clear()
+            wifi_clients = {
+                address
+                for address, state in self._clients.items()
+                if state.transport is TransportKind.WIFI
+            }
+            for address in wifi_clients:
+                self._clients.pop(address, None)
+                self._blocked_clients.discard(address)
+                self._last_ack_sent.pop(address, None)
+            if self._active_client in wifi_clients:
+                self._active_client = None
             self._rejected_pairings.clear()
-            self._last_ack_sent.clear()
 
     def disconnect_active_client(self) -> tuple[str, int] | None:
         """Release and temporarily block the current client for device change."""
@@ -331,11 +358,31 @@ class UdpReceiver:
                 self._active_client = None
             return address
 
+    def allow_transport(self, transport: TransportKind) -> None:
+        """Allow a user-disconnected transport to become active again."""
+        with self._clients_lock:
+            for address, state in self._clients.items():
+                if state.transport is transport:
+                    self._blocked_clients.discard(address)
+
     def request_stop(self) -> None:
         """Ask a running receive loop to stop within its socket timeout."""
         self._stop_event.set()
+        if self._usb_source is not None:
+            self._usb_source.request_stop()
 
     def run(self) -> None:
+        if self.enable_usb:
+            source_factory = self._usb_source_factory or (
+                lambda callback: UsbPacketSource(callback)
+            )
+            self._usb_source = source_factory(self._handle_usb_data)
+            self._usb_thread = threading.Thread(
+                target=self._usb_source.run,
+                name="niwPSPtoPC USB receiver",
+                daemon=True,
+            )
+            self._usb_thread.start()
         try:
             with self._socket_factory(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                 sock.bind((self.host, self.port))
@@ -363,105 +410,154 @@ class UdpReceiver:
                         self._maintain_clients(time.monotonic())
                         continue
 
-                    received_at = time.monotonic()
-                    with self._clients_lock:
-                        self._datagrams_received += 1
-                        self._last_datagram_at = received_at
-                    self._emit_stage(ReceiverStage.DATAGRAM_RECEIVED, address)
-                    try:
-                        packet = decode_packet(data)
-                    except PacketError as exc:
-                        with self._clients_lock:
-                            self._rejected_datagrams += 1
-                        if self.display is not None:
-                            self.display.break_line()
-                        self._log_rejection(
-                            ("decode", address[0], str(exc)),
-                            "Rejected %d-byte datagram from %s:%d: %s",
-                            len(data),
-                            address[0],
-                            address[1],
-                            exc,
-                        )
-                        continue
-
-                    if (
-                        self.allowed_hosts is not None
-                        and address[0] not in self.allowed_hosts
-                    ):
-                        with self._clients_lock:
-                            self._rejected_datagrams += 1
-                            should_log = self._remember_cache_entry_locked(
-                                self._rejected_hosts,
-                                address[0],
-                                received_at,
-                            )
-                        if should_log:
-                            LOGGER.warning(
-                                "Ignoring client %s:%d: address is not allowed",
-                                address[0],
-                                address[1],
-                            )
-                        continue
-
-                    self._emit_stage(ReceiverStage.VALID_PACKET, address)
-                    snapshot = self._handle_packet(packet, address)
-                    with self._clients_lock:
-                        if snapshot is None:
-                            self._rejected_datagrams += 1
-                        else:
-                            self._valid_packets += 1
-                    token_matches = (
-                        self._pairing_token is not None
-                        and packet.session_token == self._pairing_token
+                    self._process_data(
+                        data,
+                        address,
+                        TransportKind.WIFI,
+                        lambda ack, target=address: sock.sendto(ack, target),
                     )
-                    if snapshot is not None and token_matches:
-                        self._emit_stage(ReceiverStage.CODE_MATCHED, address)
-                    if (
-                        snapshot is not None
-                        and snapshot.is_active_client
-                        and token_matches
-                        and self._pairing_ack_is_allowed()
-                    ):
-                        now = time.monotonic()
-                        last_ack = self._last_ack_sent.get(address)
-                        if (
-                            last_ack is not None
-                            and now - last_ack < PAIRING_ACK_INTERVAL_S
-                        ):
-                            continue
-                        try:
-                            sock.sendto(
-                                encode_pairing_ack(self._pairing_token),
-                                address,
-                            )
-                        except OSError as exc:
-                            LOGGER.debug(
-                                "Could not send pairing ACK to %s:%d: %s",
-                                address[0],
-                                address[1],
-                                exc,
-                            )
-                        else:
-                            self._last_ack_sent[address] = now
-                            self._emit_stage(ReceiverStage.ACK_SENT, address)
         finally:
+            if self._usb_source is not None:
+                self._usb_source.request_stop()
+            if self._usb_thread is not None:
+                self._usb_thread.join(timeout=1.0)
             if self.display is not None:
                 self.display.finish()
+
+    def _handle_usb_data(
+        self,
+        data: bytes,
+        send_reply: Callable[[bytes], None],
+    ) -> None:
+        self._process_data(
+            data,
+            ("usb", 0),
+            TransportKind.USB,
+            send_reply,
+        )
+
+    def _process_data(
+        self,
+        data: bytes,
+        address: tuple[str, int],
+        transport: TransportKind,
+        send_ack: Callable[[bytes], object],
+    ) -> ReceiverSnapshot | None:
+        received_at = time.monotonic()
+        with self._clients_lock:
+            self._datagrams_received += 1
+            self._last_datagram_at = received_at
+        self._emit_stage(ReceiverStage.DATAGRAM_RECEIVED, address, transport)
+        try:
+            packet = decode_packet(data)
+        except PacketError as exc:
+            with self._clients_lock:
+                self._rejected_datagrams += 1
+            if self.display is not None:
+                self.display.break_line()
+            self._log_rejection(
+                ("decode", transport.value, address[0], str(exc)),
+                "Rejected %d-byte %s packet from %s:%d: %s",
+                len(data),
+                transport.value,
+                address[0],
+                address[1],
+                exc,
+            )
+            return None
+
+        if (
+            transport is TransportKind.WIFI
+            and self.allowed_hosts is not None
+            and address[0] not in self.allowed_hosts
+        ):
+            with self._clients_lock:
+                self._rejected_datagrams += 1
+                should_log = self._remember_cache_entry_locked(
+                    self._rejected_hosts,
+                    address[0],
+                    received_at,
+                )
+            if should_log:
+                LOGGER.warning(
+                    "Ignoring client %s:%d: address is not allowed",
+                    address[0],
+                    address[1],
+                )
+            return None
+
+        self._emit_stage(ReceiverStage.VALID_PACKET, address, transport)
+        snapshot = self._handle_packet(
+            packet,
+            address,
+            transport=transport,
+            now_monotonic=received_at,
+        )
+        with self._clients_lock:
+            if snapshot is None:
+                self._rejected_datagrams += 1
+            else:
+                self._valid_packets += 1
+        if transport is TransportKind.USB:
+            # A cable is a local, physical trust boundary. The session token
+            # is still echoed in the ACK so the PSP can detect receiver
+            # readiness, but the user does not have to type it.
+            ack_token = packet.session_token
+            authorization_ready = ack_token is not None
+        else:
+            with self._clients_lock:
+                configured_token = self._pairing_token
+            ack_token = configured_token
+            authorization_ready = (
+                configured_token is not None
+                and packet.session_token == configured_token
+            )
+        if snapshot is not None and authorization_ready:
+            self._emit_stage(ReceiverStage.CODE_MATCHED, address, transport)
+        if (
+            snapshot is not None
+            and snapshot.is_active_client
+            and authorization_ready
+            and ack_token is not None
+            and self._pairing_ack_is_allowed()
+        ):
+            now = time.monotonic()
+            last_ack = self._last_ack_sent.get(address)
+            if last_ack is not None and now - last_ack < PAIRING_ACK_INTERVAL_S:
+                return snapshot
+            try:
+                send_ack(encode_pairing_ack(ack_token))
+            except (OSError, RuntimeError) as exc:
+                LOGGER.debug(
+                    "Could not send pairing ACK over %s to %s:%d: %s",
+                    transport.value,
+                    address[0],
+                    address[1],
+                    exc,
+                )
+            else:
+                self._last_ack_sent[address] = now
+                self._emit_stage(ReceiverStage.ACK_SENT, address, transport)
+        return snapshot
 
     def _handle_packet(
         self,
         packet: InputPacket,
         address: tuple[str, int],
         *,
+        transport: TransportKind = TransportKind.WIFI,
         now_monotonic: float | None = None,
     ) -> ReceiverSnapshot | None:
         if now_monotonic is None:
             now_monotonic = time.monotonic()
         with self._clients_lock:
-            if self.require_pairing and (
-                self._pairing_token is None
-                or packet.session_token != self._pairing_token
+            if (
+                self.require_pairing
+                and transport is TransportKind.WIFI
+                and (
+                    self._pairing_token is None
+                    or packet.session_token != self._pairing_token
+                )
             ):
                 rejected = (address[0], packet.session_token)
                 self._pairing_rejections += 1
@@ -479,6 +575,16 @@ class UdpReceiver:
             self._maintain_clients_locked(now_monotonic)
             state = self._clients.setdefault(address, ClientState())
             if (
+                state.session_token is not None
+                and packet.session_token != state.session_token
+            ):
+                # The token identifies a PSP application session. USB always
+                # uses the same synthetic address, so a relaunch must not
+                # inherit sequence state from the previous process.
+                state.sequences = SequenceTracker()
+                state.rate = RateTracker()
+                state.inactive_warning_logged = False
+            if (
                 state.last_seen > 0
                 and now_monotonic - state.last_seen
                 >= self.active_client_timeout_s
@@ -489,16 +595,10 @@ class UdpReceiver:
                 state.sequences = SequenceTracker()
                 state.rate = RateTracker()
                 state.inactive_warning_logged = False
+            state.session_token = packet.session_token
+            state.transport = transport
             state.last_seen = now_monotonic
-            sequence_result = state.sequences.observe(packet.sequence)
-            packets_per_second = state.rate.observe(now_monotonic)
-            if sequence_result.event in {
-                SequenceEvent.FIRST,
-                SequenceEvent.IN_ORDER,
-                SequenceEvent.GAP,
-            }:
-                state.last_fresh_state = now_monotonic
-
+            transport_switched = False
             if (
                 self._active_client is None
                 and address not in self._blocked_clients
@@ -508,6 +608,44 @@ class UdpReceiver:
                 LOGGER.info(
                     "Selected active PSP client %s:%d", address[0], address[1]
                 )
+            elif (
+                self._active_client != address
+                and address not in self._blocked_clients
+            ):
+                active_state = self._clients.get(self._active_client)
+                if (
+                    active_state is not None
+                    and active_state.transport is not transport
+                    and active_state.session_token is not None
+                    and active_state.session_token == packet.session_token
+                    and now_monotonic - active_state.last_fresh_state
+                    >= TRANSPORT_SWITCH_GRACE_S
+                ):
+                    LOGGER.info(
+                        "Switched active PSP transport from %s to %s",
+                        active_state.transport.value,
+                        transport.value,
+                    )
+                    self._active_client = address
+                    state.inactive_warning_logged = False
+                    transport_switched = True
+
+            if transport_switched:
+                # Each endpoint has its own history. Restart its tracker at the
+                # handoff so packets sent through the other transport are not
+                # reported as loss or mistaken for stale input on return.
+                state.sequences = SequenceTracker()
+                state.rate = RateTracker()
+                state.last_fresh_state = 0.0
+
+            sequence_result = state.sequences.observe(packet.sequence)
+            packets_per_second = state.rate.observe(now_monotonic)
+            if sequence_result.event in {
+                SequenceEvent.FIRST,
+                SequenceEvent.IN_ORDER,
+                SequenceEvent.GAP,
+            }:
+                state.last_fresh_state = now_monotonic
 
             is_active_client = address == self._active_client
             if not is_active_client and not state.inactive_warning_logged:
@@ -535,6 +673,7 @@ class UdpReceiver:
                 out_of_order=state.sequences.out_of_order,
                 is_active_client=is_active_client,
                 is_state_update=is_state_update,
+                transport=transport,
             )
 
         latency_ms = snapshot.latency_ms
@@ -616,11 +755,12 @@ class UdpReceiver:
         self,
         stage: ReceiverStage,
         address: tuple[str, int] | None = None,
+        transport: TransportKind = TransportKind.WIFI,
     ) -> None:
         self._invoke_callback(
             "on_stage",
             self.on_stage,
-            ReceiverEvent(stage, address),
+            ReceiverEvent(stage, address, transport),
         )
 
     @staticmethod

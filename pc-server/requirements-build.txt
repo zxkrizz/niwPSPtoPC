@@ -1,2 +1,4 @@
 pyinstaller==6.21.0
+libusb-package==1.0.30.0
+pyusb==1.3.1
 vgamepad @ https://github.com/yannbouteiller/vgamepad/archive/3f910aa8bbde49a576683db74ad5e4a0879f8a80.zip

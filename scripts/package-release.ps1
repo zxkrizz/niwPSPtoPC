@@ -118,6 +118,7 @@ foreach ($Path in @($ReleaseRoot, $StagingRoot)) {
 
 $WindowsExecutable = Join-Path $DistRoot "windows\niwPSPtoPC.exe"
 $PspEboot = Join-Path $ProjectRoot "psp-client\EBOOT.PBP"
+$PspUsbHostFs = Join-Path $ProjectRoot "psp-client\usbhostfs.prx"
 $PspConfig = Join-Path $ProjectRoot "psp-client\config.ini"
 $License = Join-Path $ProjectRoot "LICENSE"
 $Notices = Join-Path $ProjectRoot "THIRD_PARTY_NOTICES.txt"
@@ -128,6 +129,7 @@ $ReleaseNotes = Join-Path $ProjectRoot "docs\releases\$Version.md"
 foreach ($RequiredFile in @(
     $WindowsExecutable,
     $PspEboot,
+    $PspUsbHostFs,
     $PspConfig,
     $License,
     $Notices,
@@ -197,6 +199,19 @@ if (-not $SkipBuild) {
             (Get-Item -LiteralPath $PspEboot).LastWriteTimeUtc }) {
         throw "PSP EBOOT.PBP is stale relative to its sources."
     }
+    $UsbHostFsSources = @(
+        Get-Item -LiteralPath (
+            Join-Path $ProjectRoot "scripts\build-usbhostfs.sh"
+        )
+        Get-Item -LiteralPath (
+            Join-Path $ProjectRoot "psp-client\vendor\usbhostfs-winusb.patch"
+        )
+    )
+    if ($UsbHostFsSources |
+        Where-Object { $_.LastWriteTimeUtc -gt
+            (Get-Item -LiteralPath $PspUsbHostFs).LastWriteTimeUtc }) {
+        throw "usbhostfs.prx is stale relative to its pinned build inputs."
+    }
 }
 
 if (Test-Path -LiteralPath $ReleaseRoot) {
@@ -221,10 +236,12 @@ Copy-Item -LiteralPath $ReleaseNotes `
     -Destination (Join-Path $WindowsStage "RELEASE-NOTES.md")
 
 Copy-Item -LiteralPath $PspEboot -Destination $PspStage
+Copy-Item -LiteralPath $PspUsbHostFs -Destination $PspStage
 Copy-Item -LiteralPath $PspConfig -Destination $PspStage
 Copy-Item -LiteralPath $PspReadme `
     -Destination (Join-Path $PspStage "README.txt")
 Copy-Item -LiteralPath $License -Destination $PspStage
+Copy-Item -LiteralPath $Notices -Destination $PspStage
 Copy-Item -LiteralPath $ReleaseNotes `
     -Destination (Join-Path $PspStage "RELEASE-NOTES.md")
 
@@ -258,6 +275,24 @@ foreach ($Archive in @($WindowsArchive, $PspArchive)) {
             }
             if (-not $Entry.FullName.EndsWith("/") -and $Entry.Length -eq 0) {
                 throw "Empty release file in archive: $($Entry.FullName)"
+            }
+        }
+        $EntryNames = @(
+            $Zip.Entries |
+                ForEach-Object { $_.FullName.Replace("\", "/") }
+        )
+        if ($Archive -eq $PspArchive) {
+            foreach ($RequiredEntry in @(
+                "niwPSPtoPC/EBOOT.PBP",
+                "niwPSPtoPC/usbhostfs.prx",
+                "niwPSPtoPC/config.ini",
+                "niwPSPtoPC/THIRD_PARTY_NOTICES.txt"
+            )) {
+                if ($RequiredEntry -notin $EntryNames) {
+                    throw (
+                        "PSP release archive is missing $RequiredEntry."
+                    )
+                }
             }
         }
     } finally {

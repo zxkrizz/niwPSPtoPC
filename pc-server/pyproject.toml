@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "niwpsptopc-receiver"
 dynamic = ["version"]
-description = "Receive PSP controller input over Wi-Fi on a PC"
+description = "Ultimate wireless and wired gamepad for PSP and Windows"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
@@ -14,6 +14,8 @@ dependencies = []
 
 [project.optional-dependencies]
 windows = [
+  "libusb-package==1.0.30.0",
+  "pyusb==1.3.1",
   "vgamepad @ https://github.com/yannbouteiller/vgamepad/archive/3f910aa8bbde49a576683db74ad5e4a0879f8a80.zip",
 ]
 

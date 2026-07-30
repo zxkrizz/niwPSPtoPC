@@ -13,7 +13,7 @@ class DoctorStage(Enum):
     PORT_BOUND = "PORT BOUND"
     DATAGRAM_RECEIVED = "DATAGRAM RECEIVED"
     VALID_PACKET = "VALID PACKET"
-    CODE_MATCHED = "CODE MATCHED"
+    CODE_MATCHED = "AUTH READY"
     ACK_SENT = "ACK SENT"
     GAMEPAD_CREATED = "GAMEPAD CREATED"
 
@@ -83,25 +83,25 @@ class ConnectionDoctor:
             and DoctorStage.VALID_PACKET not in self.completed
         ):
             return (
-                f"No UDP datagram on UDP {port}. Check the same LAN, Windows "
-                "Private profile/firewall, and client isolation. Guest Wi-Fi "
-                "often blocks PSP-to-PC traffic; broadcast may not cross "
-                "network interfaces."
+                "No controller data yet. For USB, check the data cable and "
+                "the PSP transport selection. For Wi-Fi, check UDP "
+                f"{port}, the same LAN, Windows Private profile/firewall, and "
+                "client isolation. Guest Wi-Fi often blocks PSP-to-PC traffic."
             )
         if DoctorStage.VALID_PACKET not in self.completed:
             return (
-                "UDP traffic reaches the app, but no valid PSP packet passed "
-                "protocol decoding and the IP allowlist."
+                "Input reaches the app, but no valid PSP packet passed "
+                "protocol decoding or the Wi-Fi IP allowlist."
             )
         if DoctorStage.CODE_MATCHED not in self.completed:
             return (
-                "Packets reach this PC, but the code does not match. Re-enter "
-                "the PSP code and confirm both sides use the same UDP port."
+                "USB is authorized automatically. For Wi-Fi, re-enter the PSP "
+                "code and confirm both sides use the same UDP port."
             )
         if DoctorStage.ACK_SENT not in self.completed:
             return (
-                "The code matched, but the ACK was not sent. Check the local "
-                "socket and firewall state."
+                "Input was authorized, but the readiness ACK was not sent. "
+                "Check the virtual gamepad and active transport."
             )
         return "All connection checks passed."
 
@@ -137,7 +137,7 @@ class ConnectionDoctor:
         )
 
         metrics = self.metrics
-        lines.extend(("", "UDP metrics:"))
+        lines.extend(("", "Input metrics:"))
         if metrics is None:
             lines.append("- unavailable")
         else:

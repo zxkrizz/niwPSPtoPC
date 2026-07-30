@@ -80,3 +80,26 @@ release separately. It is licensed under BSD-3-Clause and has been retired by
 its maintainers.
 
 Source and license: https://github.com/nefarius/ViGEmBus
+
+PyUSB
+-----
+Copyright (c) 2005-2026 PyUSB contributors.
+Licensed under BSD-3-Clause.
+Source and license: https://github.com/pyusb/pyusb
+
+libusb-package and libusb
+-------------------------
+libusb-package is Copyright (c) 2021-2026 Chris Reed and is licensed under
+Apache-2.0. Its bundled libusb shared library is licensed under
+LGPL-2.1-or-later.
+Sources and licenses:
+https://github.com/pyocd/libusb-package
+https://github.com/libusb/libusb
+
+PSPLink USBHostFS
+-----------------
+Copyright (c) TyRaNiD 2005-2007, Julian T 2005/2006, Rasmus B 2006,
+John_K 2005, and PSPDEV contributors 2010-2026.
+Licensed under BSD-3-Clause. The PSP package includes usbhostfs.prx built from
+revision 8cc9876a868d202c0ef4197395c5278aeeff2829.
+Source and license: https://github.com/pspdev/psplinkusb

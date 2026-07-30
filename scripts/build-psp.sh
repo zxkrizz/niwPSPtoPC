@@ -38,6 +38,7 @@ if [ ! -f "$PSPSDK_PATH/lib/build.mak" ]; then
     exit 1
 fi
 
+bash "$SCRIPT_DIR/build-usbhostfs.sh"
 make -C "$PROJECT_ROOT/psp-client" all
 
 if [ ! -f "$PROJECT_ROOT/psp-client/EBOOT.PBP" ]; then

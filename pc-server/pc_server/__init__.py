@@ -1,4 +1,4 @@
-"""niwPSPtoPC UDP controller receiver."""
+"""niwPSPtoPC wireless and wired gamepad receiver."""
 
 from ._version import __version__
 from .protocol import (

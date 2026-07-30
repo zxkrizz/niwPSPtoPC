@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from pc_server import __version__
 from pc_server.connection_doctor import ConnectionDoctor, DoctorStage
 from pc_server.receiver import ReceiverMetrics
 from pc_server.windows_diagnostics import (
@@ -35,7 +36,7 @@ class ConnectionDoctorTests(unittest.TestCase):
 
         guidance = doctor.guidance(port=48000)
 
-        self.assertIn("code does not match", guidance)
+        self.assertIn("For Wi-Fi", guidance)
         self.assertIn("same UDP port", guidance)
 
     def test_reset_pairing_keeps_pc_preflight_results(self) -> None:
@@ -84,7 +85,7 @@ class ConnectionDoctorTests(unittest.TestCase):
         )
 
         report = doctor.diagnostic_report(
-            app_version="1.1.0",
+            app_version=__version__,
             configured_host="0.0.0.0",
             port=47999,
             allowed_hosts=("192.168.1.33",),

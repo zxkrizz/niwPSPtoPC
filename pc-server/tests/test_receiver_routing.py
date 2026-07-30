@@ -12,7 +12,12 @@ from pc_server.protocol import (
     encode_packet,
     parse_pairing_token,
 )
-from pc_server.receiver import ReceiverStage, SequenceEvent, UdpReceiver
+from pc_server.receiver import (
+    ReceiverStage,
+    SequenceEvent,
+    TransportKind,
+    UdpReceiver,
+)
 
 
 def packet(
@@ -104,6 +109,27 @@ class ReceiverRoutingTests(unittest.TestCase):
         self.assertIsNone(receiver.active_client)
         self.assertEqual(receiver.client_count, 0)
 
+    def test_changing_wifi_code_preserves_active_usb_client(self) -> None:
+        receiver = UdpReceiver(
+            "127.0.0.1",
+            0,
+            require_pairing=True,
+        )
+        usb = ("usb", 0)
+        receiver._handle_packet(
+            packet(
+                0,
+                session_token=parse_pairing_token("ABCDE"),
+            ),
+            usb,
+            transport=TransportKind.USB,
+        )
+
+        receiver.set_pairing_token(parse_pairing_token("FGHJK"))
+
+        self.assertEqual(receiver.active_client, usb)
+        self.assertEqual(receiver.client_count, 1)
+
     def test_state_callback_filters_duplicate_and_out_of_order(self) -> None:
         states = []
         diagnostics = []
@@ -188,6 +214,139 @@ class ReceiverRoutingTests(unittest.TestCase):
         self.assertFalse(blocked_snapshot.is_state_update)
         self.assertTrue(selected_snapshot.is_state_update)
         self.assertEqual(receiver.active_client, second)
+
+    def test_transport_can_be_reallowed_after_user_disconnect(self) -> None:
+        receiver = UdpReceiver("127.0.0.1", 0)
+        usb = ("usb", 0)
+        receiver._handle_packet(
+            packet(0),
+            usb,
+            transport=TransportKind.USB,
+            now_monotonic=1.0,
+        )
+        receiver.disconnect_active_client()
+        blocked = receiver._handle_packet(
+            packet(1),
+            usb,
+            transport=TransportKind.USB,
+            now_monotonic=1.1,
+        )
+
+        receiver.allow_transport(TransportKind.USB)
+        allowed = receiver._handle_packet(
+            packet(2),
+            usb,
+            transport=TransportKind.USB,
+            now_monotonic=1.2,
+        )
+
+        self.assertFalse(blocked.is_state_update)
+        self.assertTrue(allowed.is_state_update)
+        self.assertEqual(receiver.active_client, usb)
+
+    def test_same_session_switches_transport_after_short_grace(self) -> None:
+        token = parse_pairing_token("ABCDE")
+        receiver = UdpReceiver(
+            "127.0.0.1",
+            0,
+            pairing_token=token,
+            require_pairing=True,
+        )
+        wifi = ("10.0.0.33", 51060)
+        usb = ("usb", 0)
+        receiver._handle_packet(
+            packet(10, session_token=token),
+            wifi,
+            transport=TransportKind.WIFI,
+            now_monotonic=10.0,
+        )
+
+        too_soon = receiver._handle_packet(
+            packet(0, session_token=token),
+            usb,
+            transport=TransportKind.USB,
+            now_monotonic=10.10,
+        )
+        switched = receiver._handle_packet(
+            packet(1, session_token=token),
+            usb,
+            transport=TransportKind.USB,
+            now_monotonic=10.16,
+        )
+
+        self.assertFalse(too_soon.is_state_update)
+        self.assertTrue(switched.is_state_update)
+        self.assertEqual(receiver.active_client, usb)
+
+    def test_same_session_switches_back_from_usb_to_wifi(self) -> None:
+        token = parse_pairing_token("ABCDE")
+        receiver = UdpReceiver(
+            "127.0.0.1",
+            0,
+            pairing_token=token,
+            require_pairing=True,
+        )
+        usb = ("usb", 0)
+        wifi = ("10.0.0.33", 51060)
+        receiver._handle_packet(
+            packet(0, session_token=token),
+            usb,
+            transport=TransportKind.USB,
+            now_monotonic=20.0,
+        )
+
+        too_soon = receiver._handle_packet(
+            packet(0, session_token=token),
+            wifi,
+            transport=TransportKind.WIFI,
+            now_monotonic=20.10,
+        )
+        switched = receiver._handle_packet(
+            packet(1, session_token=token),
+            wifi,
+            transport=TransportKind.WIFI,
+            now_monotonic=20.16,
+        )
+
+        self.assertFalse(too_soon.is_state_update)
+        self.assertTrue(switched.is_state_update)
+        self.assertEqual(switched.sequence_result.event, SequenceEvent.FIRST)
+        self.assertEqual(receiver.active_client, wifi)
+
+    def test_return_to_used_transport_does_not_restore_stale_sequence(self) -> None:
+        token = parse_pairing_token("ABCDE")
+        receiver = UdpReceiver(
+            "127.0.0.1",
+            0,
+            pairing_token=token,
+            require_pairing=True,
+        )
+        wifi = ("10.0.0.33", 51060)
+        usb = ("usb", 0)
+        receiver._handle_packet(
+            packet(500, session_token=token),
+            wifi,
+            transport=TransportKind.WIFI,
+            now_monotonic=30.0,
+        )
+        receiver._handle_packet(
+            packet(501, session_token=token),
+            usb,
+            transport=TransportKind.USB,
+            now_monotonic=30.16,
+        )
+
+        returned = receiver._handle_packet(
+            packet(502, session_token=token),
+            wifi,
+            transport=TransportKind.WIFI,
+            now_monotonic=30.32,
+        )
+
+        self.assertTrue(returned.is_state_update)
+        self.assertEqual(returned.sequence_result.event, SequenceEvent.FIRST)
+        self.assertEqual(returned.lost, 0)
+        self.assertEqual(receiver.active_client, wifi)
 
     def test_inactive_clients_expire_and_active_lock_times_out(self) -> None:
         receiver = UdpReceiver(
