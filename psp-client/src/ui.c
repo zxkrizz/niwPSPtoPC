@@ -405,6 +405,39 @@ void ui_render_connecting(
     draw_footer("HOME  EXIT", "WI-FI LINK");
 }
 
+void ui_render_reconnecting(
+    const char *pairing_code,
+    const char *state_name,
+    unsigned int attempt,
+    unsigned int retry_in_seconds)
+{
+    char attempt_label[32];
+    char retry_label[40];
+
+    snprintf(attempt_label, sizeof(attempt_label), "ATTEMPT %u", attempt);
+    if (retry_in_seconds > 0) {
+        snprintf(
+            retry_label,
+            sizeof(retry_label),
+            "RETRY IN %u SECOND%s",
+            retry_in_seconds,
+            retry_in_seconds == 1 ? "" : "S");
+    } else {
+        strcpy(retry_label, "CONNECTING NOW...");
+    }
+
+    draw_background();
+    draw_header(pairing_code);
+    draw_panel(16, 76, 448, 142, COLOR_PANEL);
+    draw_status_dot(32, 92, COLOR_WARN);
+    draw_text(52, 90, COLOR_WARN, "RECONNECTING WI-FI");
+    fill_rect(30, 112, 420, 2, COLOR_BORDER);
+    draw_text_clipped(30, 130, 44, COLOR_TEXT, state_name);
+    draw_text(30, 158, COLOR_MUTED, attempt_label);
+    draw_text(30, 184, COLOR_ACCENT, retry_label);
+    draw_footer("HOME  CANCEL / EXIT", "AUTO RETRY");
+}
+
 void ui_render_sender(
     const char *pairing_code,
     int authorized,

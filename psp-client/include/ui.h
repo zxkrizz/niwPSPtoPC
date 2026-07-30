@@ -13,6 +13,11 @@ void ui_render_connecting(
     const char *pairing_code,
     const char *state_name,
     int progress_stage);
+void ui_render_reconnecting(
+    const char *pairing_code,
+    const char *state_name,
+    unsigned int attempt,
+    unsigned int retry_in_seconds);
 void ui_render_sender(
     const char *pairing_code,
     int authorized,

@@ -2,6 +2,35 @@
 
 All notable public changes are documented here.
 
+## 1.1.0 — 2026-07-30
+
+- added automatic PSP backlight shutoff ten seconds after pairing, with the
+  previous brightness restored on HOME/SCREEN, connection loss and exit;
+- resolved backlight functions dynamically through the CFW user bridge so the
+  user-mode EBOOT has no direct kernel display-driver import;
+- added dynamic PSP clock scaling: 333/333/166 MHz for startup, discovery and
+  recovery, then 111/111/55 MHz while the controller link is stable;
+- bounded PSP pairing-ACK processing to 32 datagrams per sender cycle so a UDP
+  flood cannot trap the client in an unbounded receive loop;
+- documented WPA2 operation through recent ARK-4 and ARK-5 CFW releases while
+  retaining guidance for legacy WPA, 2.4 GHz and client-isolation constraints;
+- added automatic PSP Wi-Fi recovery with socket recreation, broadcast
+  rediscovery, cancellable reconnect UI and capped exponential backoff;
+- changed the time-critical PSP sender to non-blocking controller peeks;
+- hardened the receiver with bounded rejection caches, callback isolation,
+  raw/valid packet diagnostics and active-client expiry;
+- added safe virtual-gamepad recovery, including one automatic retry and
+  distinct missing-library, missing-driver, connection and update errors;
+- expanded Connection Doctor 2.0 with Windows IPv4, profile, firewall and VPN
+  checks, live UDP health metrics and a copyable report;
+- added persistent GUI settings for the bind address, UDP port and PSP IP
+  allowlist, with receiver-only restart;
+- strengthened release engineering with immutable GitHub Action pins,
+  Dependabot, cancellable CI, tag ancestry checks, provenance attestations,
+  idempotent uploads and an embedded PerMonitorV2 Windows manifest;
+- retained ViGEmBus 1.22.0 as the single Windows virtual-gamepad backend and
+  documented its end-of-life status.
+
 ## 1.0.1 — 2026-07-29
 
 - kept the ViGEm XInput target connected across PSP packet and session

@@ -11,8 +11,18 @@ from tkinter import ttk
 
 from . import __version__
 from .connection_doctor import ConnectionDoctor, DoctorStage
-from .gamepad import ControllerEvent, ControllerEventType, ControllerService
-from .gui_settings import APP_NAME, load_settings
+from .gamepad import (
+    BackendFailureKind,
+    ControllerEvent,
+    ControllerEventType,
+    ControllerService,
+)
+from .gui_settings import (
+    APP_NAME,
+    load_settings,
+    save_settings,
+    validate_bind_settings,
+)
 from .protocol import Buttons, InputPacket, format_pairing_token, parse_pairing_token
 from .receiver import (
     ReceiverEvent,
@@ -21,7 +31,7 @@ from .receiver import (
     UdpReceiver,
 )
 from .single_instance import SingleInstance
-
+from .windows_diagnostics import collect_windows_network_diagnostics
 
 COLOR_BG = "#061014"
 COLOR_BG_GRID = "#0B1A1E"
@@ -555,6 +565,10 @@ class NiwPspToPcApp:
         self._paired_address: tuple[str, int] | None = None
         self._active_token: int | None = None
         self._doctor_row_labels: list[tk.Label] = []
+        self._doctor_window: tk.Toplevel | None = None
+        self._doctor_text: tk.Text | None = None
+        self._settings_window: tk.Toplevel | None = None
+        self._restart_pending = False
         self._compact_layout = False
         self._short_layout = False
 
@@ -570,6 +584,8 @@ class NiwPspToPcApp:
         self.root.bind("<Configure>", self._on_window_resize)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.after(50, self._poll_messages)
+        self.root.after(300, self._refresh_system_diagnostics)
+        self.root.after(1000, self._refresh_live_diagnostics)
         if auto_start:
             self.root.after(150, self.start_receiver)
 
@@ -743,6 +759,21 @@ class NiwPspToPcApp:
             pady=8,
             font=(PIXEL_FONT, 8, "bold"),
         ).pack()
+        tk.Button(
+            header,
+            text="SETTINGS",
+            command=self.open_settings,
+            bg=COLOR_PANEL_LIGHT,
+            fg=COLOR_TEXT,
+            activebackground=COLOR_BORDER,
+            activeforeground=COLOR_TEXT,
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=8,
+            cursor="hand2",
+            font=(PIXEL_FONT, 8, "bold"),
+        ).pack(side="right", padx=(0, 8))
 
     def _build_pairing_card(self, master: tk.Misc) -> None:
         body = tk.Frame(master, bg=COLOR_PANEL)
@@ -896,6 +927,15 @@ class NiwPspToPcApp:
             )
             self._doctor_row_labels.append(label)
         self.doctor_detail_var = tk.StringVar()
+        self.doctor_metrics_var = tk.StringVar(value="UDP: waiting for data")
+        tk.Label(
+            doctor,
+            textvariable=self.doctor_metrics_var,
+            bg=COLOR_PANEL,
+            fg=COLOR_BLUE,
+            justify="left",
+            font=(PIXEL_FONT, 7, "bold"),
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
         tk.Label(
             doctor,
             textvariable=self.doctor_detail_var,
@@ -904,7 +944,33 @@ class NiwPspToPcApp:
             justify="left",
             wraplength=350,
             font=("Segoe UI", 7),
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(3, 0))
+        tk.Button(
+            doctor,
+            text="OPEN DOCTOR 2.0",
+            command=self.open_doctor,
+            bg=COLOR_PANEL_LIGHT,
+            fg=COLOR_BLUE,
+            activebackground=COLOR_BORDER,
+            activeforeground=COLOR_TEXT,
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            font=(PIXEL_FONT, 7, "bold"),
+        ).grid(row=6, column=0, sticky="ew", padx=(0, 3), pady=(5, 0))
+        tk.Button(
+            doctor,
+            text="COPY REPORT",
+            command=self.copy_diagnostic_report,
+            bg=COLOR_PANEL_LIGHT,
+            fg=COLOR_ACCENT,
+            activebackground=COLOR_BORDER,
+            activeforeground=COLOR_TEXT,
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            font=(PIXEL_FONT, 7, "bold"),
+        ).grid(row=6, column=1, sticky="ew", padx=(3, 0), pady=(5, 0))
         self._refresh_doctor()
 
         self._gamepad_panel = tk.Frame(
@@ -928,6 +994,20 @@ class NiwPspToPcApp:
             fg=COLOR_ACCENT,
             font=(PIXEL_FONT, 8, "bold"),
         ).pack(side="right", padx=12, pady=11)
+        self.retry_gamepad_button = tk.Button(
+            self._gamepad_panel,
+            text="RETRY GAMEPAD",
+            command=self.retry_gamepad,
+            bg=COLOR_PANEL_LIGHT,
+            fg=COLOR_WARN,
+            activebackground=COLOR_BORDER,
+            activeforeground=COLOR_TEXT,
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            font=(PIXEL_FONT, 7, "bold"),
+        )
+        self.retry_gamepad_button.pack(side="right", padx=(4, 0), pady=7)
 
     @staticmethod
     def _normalize_code_text(value: str) -> str:
@@ -965,23 +1045,294 @@ class NiwPspToPcApp:
             self.doctor_detail_var.set(
                 self._doctor.guidance(port=self._doctor_port)
             )
+        metrics = self._doctor.metrics
+        if hasattr(self, "doctor_metrics_var") and metrics is not None:
+            age = (
+                f"{metrics.last_datagram_age_s:.1f}s"
+                if metrics.last_datagram_age_s is not None
+                else "never"
+            )
+            self.doctor_metrics_var.set(
+                f"UDP {metrics.valid_packets} OK / "
+                f"{metrics.rejected_datagrams} REJECTED  //  "
+                f"{metrics.packets_per_second:.0f} HZ  //  "
+                f"LOSS {metrics.loss_percent:.1f}%  //  LAST {age}"
+            )
+        self._update_doctor_window()
+
+    def _diagnostic_report(self) -> str:
+        receiver = self._receiver
+        active_client = receiver.active_client if receiver is not None else None
+        settings = self._settings
+        return self._doctor.diagnostic_report(
+            app_version=__version__,
+            configured_host=settings.host,
+            port=settings.port,
+            allowed_hosts=settings.allowed_hosts,
+            active_client=active_client,
+        )
+
+    def _update_doctor_window(self) -> None:
+        text = getattr(self, "_doctor_text", None)
+        window = getattr(self, "_doctor_window", None)
+        if (
+            text is None
+            or window is None
+            or not window.winfo_exists()
+        ):
+            return
+        text.configure(state="normal")
+        text.delete("1.0", "end")
+        text.insert("1.0", self._diagnostic_report())
+        text.configure(state="disabled")
+
+    def open_doctor(self) -> None:
+        if (
+            self._doctor_window is not None
+            and self._doctor_window.winfo_exists()
+        ):
+            self._doctor_window.lift()
+            self._doctor_window.focus_force()
+            return
+        window = tk.Toplevel(self.root)
+        self._doctor_window = window
+        window.title("Connection Doctor 2.0")
+        window.geometry("720x560")
+        window.minsize(560, 420)
+        window.configure(bg=COLOR_BG)
+        text = tk.Text(
+            window,
+            bg=COLOR_SCREEN,
+            fg=COLOR_TEXT,
+            insertbackground=COLOR_TEXT,
+            relief="flat",
+            wrap="word",
+            padx=16,
+            pady=16,
+            font=("Cascadia Mono", 9),
+        )
+        self._doctor_text = text
+        text.pack(fill="both", expand=True, padx=16, pady=(16, 8))
+        actions = tk.Frame(window, bg=COLOR_BG)
+        actions.pack(fill="x", padx=16, pady=(0, 16))
+        tk.Button(
+            actions,
+            text="REFRESH WINDOWS CHECKS",
+            command=self._refresh_system_diagnostics,
+            bg=COLOR_BLUE,
+            fg=COLOR_INK,
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=8,
+            font=(PIXEL_FONT, 8, "bold"),
+        ).pack(side="left")
+        tk.Button(
+            actions,
+            text="COPY DIAGNOSTIC REPORT",
+            command=self.copy_diagnostic_report,
+            bg=COLOR_ACCENT,
+            fg=COLOR_INK,
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=8,
+            font=(PIXEL_FONT, 8, "bold"),
+        ).pack(side="right")
+
+        def close_doctor() -> None:
+            self._doctor_text = None
+            self._doctor_window = None
+            window.destroy()
+
+        window.protocol("WM_DELETE_WINDOW", close_doctor)
+        self._update_doctor_window()
+
+    def copy_diagnostic_report(self) -> None:
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self._diagnostic_report())
+        self.root.update_idletasks()
+        self._set_status(
+            "REPORT COPIED",
+            "Connection Doctor diagnostics are on the clipboard.",
+            COLOR_BLUE,
+        )
+
+    def _refresh_system_diagnostics(self) -> None:
+        if self._closing:
+            return
+        port = self._settings.port
+
+        def worker() -> None:
+            result = collect_windows_network_diagnostics(port)
+            self._messages.put(("network-diagnostics", (port, result)))
+
+        threading.Thread(
+            target=worker,
+            name="niwPSPtoPC Windows diagnostics",
+            daemon=True,
+        ).start()
+
+    def _refresh_live_diagnostics(self) -> None:
+        if self._closing:
+            return
+        if self._receiver is not None:
+            self._doctor.update_metrics(self._receiver.metrics())
+            self._refresh_doctor()
+        self.root.after(1000, self._refresh_live_diagnostics)
+
+    def open_settings(self) -> None:
+        if (
+            self._settings_window is not None
+            and self._settings_window.winfo_exists()
+        ):
+            self._settings_window.lift()
+            self._settings_window.focus_force()
+            return
+        window = tk.Toplevel(self.root)
+        self._settings_window = window
+        window.title("niwPSPtoPC Settings")
+        window.geometry("520x330")
+        window.resizable(False, False)
+        window.configure(bg=COLOR_BG)
+        settings = self._settings
+        host_var = tk.StringVar(value=settings.host)
+        port_var = tk.StringVar(value=str(settings.port))
+        allowed_var = tk.StringVar(value=", ".join(settings.allowed_hosts))
+        form = tk.Frame(window, bg=COLOR_BG)
+        form.pack(fill="both", expand=True, padx=24, pady=20)
+
+        def add_field(label: str, variable: tk.StringVar) -> None:
+            tk.Label(
+                form,
+                text=label,
+                bg=COLOR_BG,
+                fg=COLOR_MUTED,
+                font=(PIXEL_FONT, 8, "bold"),
+            ).pack(anchor="w", pady=(8, 3))
+            tk.Entry(
+                form,
+                textvariable=variable,
+                bg=COLOR_SCREEN,
+                fg=COLOR_TEXT,
+                insertbackground=COLOR_TEXT,
+                relief="flat",
+                highlightbackground=COLOR_BORDER,
+                highlightthickness=1,
+                font=("Segoe UI", 10),
+            ).pack(fill="x", ipady=5)
+
+        add_field("LISTEN IPV4 ADDRESS", host_var)
+        add_field("UDP PORT", port_var)
+        add_field("PSP IPV4 ALLOWLIST (COMMA-SEPARATED, EMPTY = ANY)", allowed_var)
+        tk.Label(
+            form,
+            text="Saving restarts only the UDP receiver and gamepad preflight.",
+            bg=COLOR_BG,
+            fg=COLOR_MUTED,
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", pady=(10, 4))
+        tk.Button(
+            form,
+            text="[ SAVE AND RESTART RECEIVER ]",
+            command=lambda: self.apply_settings(
+                host_var.get(),
+                port_var.get(),
+                allowed_var.get(),
+                window=window,
+            ),
+            bg=COLOR_ACCENT,
+            fg=COLOR_INK,
+            relief="flat",
+            bd=0,
+            pady=9,
+            font=(PIXEL_FONT, 8, "bold"),
+        ).pack(fill="x", pady=(8, 0))
+
+        def close_settings() -> None:
+            self._settings_window = None
+            window.destroy()
+
+        window.protocol("WM_DELETE_WINDOW", close_settings)
+
+    def apply_settings(
+        self,
+        host_text: str,
+        port_text: str,
+        allowed_hosts_text: str,
+        *,
+        window: tk.Toplevel | None = None,
+    ) -> bool:
+        try:
+            settings = validate_bind_settings(
+                host_text,
+                port_text,
+                allowed_hosts_text,
+            )
+            save_settings(settings)
+        except (OSError, ValueError) as exc:
+            self._set_status("SETTINGS ERROR", str(exc), COLOR_DANGER)
+            return False
+
+        self._settings = settings
+        if window is not None and window.winfo_exists():
+            window.destroy()
+            self._settings_window = None
+
+        self._set_status(
+            "RESTARTING RECEIVER",
+            f"Applying UDP {settings.host}:{settings.port}.",
+            COLOR_WARN,
+        )
+        if self._running and self._receiver is not None:
+            self._restart_pending = True
+            self._receiver.request_stop()
+            if self._controller_service is not None:
+                self._controller_service.stop()
+        else:
+            self.start_receiver()
+        return True
+
+    def retry_gamepad(self) -> None:
+        service = self._controller_service
+        if service is None:
+            self._set_status(
+                "GAMEPAD NOT READY",
+                "Start the receiver before retrying the gamepad.",
+                COLOR_WARN,
+            )
+            return
+        self.gamepad_var.set("RETRYING")
+        self._set_status(
+            "RETRYING GAMEPAD",
+            "Running virtual-controller preflight again.",
+            COLOR_BLUE,
+        )
+        service.retry_backend()
 
     def start_receiver(self) -> None:
         if self._running or self._closing:
             return
         settings = self._settings
+        # A settings restart is scheduled only after the old receiver's
+        # messages, including its terminal "stopped" event, have been drained.
+        # Reset diagnostics here so stale events cannot be attributed to the
+        # new bind configuration.
+        self._doctor = ConnectionDoctor()
         self._doctor_port = settings.port
+        self._refresh_doctor()
+        self._refresh_system_diagnostics()
         self._running = True
         self._controller_service = ControllerService(
             on_event=lambda event: self._messages.put(("controller", event))
         )
+        controller_service = self._controller_service
 
         def apply_controller_state(snapshot: ReceiverSnapshot) -> None:
             self._messages.put(("packet", snapshot))
-            if self._controller_service is not None:
-                self._controller_service.handle_snapshot(snapshot)
+            controller_service.handle_snapshot(snapshot)
 
-        self._receiver = UdpReceiver(
+        receiver = UdpReceiver(
             settings.host,
             settings.port,
             on_packet=apply_controller_state,
@@ -991,18 +1342,19 @@ class NiwPspToPcApp:
             pairing_token=self._active_token,
             require_pairing=True,
         )
-        self._controller_service.ensure_backend()
+        self._receiver = receiver
+        controller_service.ensure_backend()
 
         def worker() -> None:
             try:
-                assert self._receiver is not None
-                self._receiver.run()
+                receiver.run()
             except OSError as exc:
                 self._messages.put(("error", exc))
             finally:
-                if self._controller_service is not None:
-                    self._controller_service.stop()
-                self._messages.put(("stopped", None))
+                controller_service.stop()
+                self._messages.put(
+                    ("stopped", (receiver, controller_service))
+                )
 
         self._receiver_thread = threading.Thread(
             target=worker,
@@ -1072,6 +1424,9 @@ class NiwPspToPcApp:
             while True:
                 kind, payload = self._messages.get_nowait()
                 if kind == "listening":
+                    address = payload
+                    if isinstance(address, tuple):
+                        self._doctor.set_bound_address(address)
                     self._set_status(
                         "ENTER PSP CODE",
                         "The receiver is ready.",
@@ -1084,6 +1439,11 @@ class NiwPspToPcApp:
                     self._apply_snapshot(payload)  # type: ignore[arg-type]
                 elif kind == "controller":
                     self._apply_controller_event(payload)  # type: ignore[arg-type]
+                elif kind == "network-diagnostics":
+                    diagnostic_port, diagnostics = payload  # type: ignore[misc]
+                    if diagnostic_port == self._settings.port:
+                        self._doctor.update_network(diagnostics)
+                        self._refresh_doctor()
                 elif kind == "error":
                     error = payload
                     if getattr(error, "winerror", None) == 10048:
@@ -1093,7 +1453,18 @@ class NiwPspToPcApp:
                     self._set_status("RECEIVER ERROR", detail, COLOR_DANGER)
                     self.controller_view.set_link_state("RECEIVER ERROR", "CHECK PC")
                 elif kind == "stopped":
-                    self._running = False
+                    stopped_receiver = (
+                        payload[0]
+                        if isinstance(payload, tuple) and len(payload) == 2
+                        else self._receiver
+                    )
+                    if stopped_receiver is self._receiver:
+                        self._running = False
+                        self._receiver = None
+                        self._controller_service = None
+                        if self._restart_pending and not self._closing:
+                            self._restart_pending = False
+                            self.root.after(50, self.start_receiver)
         except queue.Empty:
             pass
         if not self._closing:
@@ -1115,6 +1486,8 @@ class NiwPspToPcApp:
             self._doctor.mark(DoctorStage.GAMEPAD_CREATED)
             self._refresh_doctor()
             self.gamepad_var.set("READY")
+            if hasattr(self, "retry_gamepad_button"):
+                self.retry_gamepad_button.configure(state="disabled")
             return
         if event.event is ControllerEventType.CONNECTED:
             self.gamepad_var.set("ACTIVE")
@@ -1138,10 +1511,42 @@ class NiwPspToPcApp:
             self.gamepad_var.set("OFFLINE")
             self._doctor.fail_gamepad(event.error or "ViGEmBus unavailable")
             self._refresh_doctor()
-            self.controller_view.set_link_state("DRIVER ERROR", "INSTALL VIGEMBUS")
+            if hasattr(self, "retry_gamepad_button"):
+                self.retry_gamepad_button.configure(state="normal")
+            failure_copy = {
+                BackendFailureKind.MISSING_LIBRARY: (
+                    "GAMEPAD LIBRARY MISSING",
+                    "Reinstall the Windows application package, then retry.",
+                    "LIBRARY MISSING",
+                ),
+                BackendFailureKind.MISSING_DRIVER: (
+                    "GAMEPAD DRIVER MISSING",
+                    "Install ViGEmBus, then use RETRY GAMEPAD.",
+                    "INSTALL VIGEMBUS",
+                ),
+                BackendFailureKind.DRIVER_CONNECTION: (
+                    "GAMEPAD DRIVER ERROR",
+                    "The driver is present but unavailable. Check it, then retry.",
+                    "DRIVER CONNECTION",
+                ),
+                BackendFailureKind.UPDATE_FAILED: (
+                    "GAMEPAD UPDATE ERROR",
+                    "The virtual pad connection failed during input. Retry it.",
+                    "UPDATE FAILED",
+                ),
+            }
+            title, detail, link_detail = failure_copy.get(
+                event.failure,
+                (
+                    "GAMEPAD ERROR",
+                    event.error or "Correct the backend error, then retry.",
+                    "BACKEND ERROR",
+                ),
+            )
+            self.controller_view.set_link_state("DRIVER ERROR", link_detail)
             self._set_status(
-                "GAMEPAD DRIVER MISSING",
-                event.error or "Install ViGEmBus and restart the application.",
+                title,
+                detail,
                 COLOR_DANGER,
             )
         elif event.reason == "timeout" and self._running:
@@ -1161,7 +1566,8 @@ class NiwPspToPcApp:
     def _apply_receiver_stage(self, event: ReceiverEvent) -> None:
         mapping = {
             ReceiverStage.PORT_BOUND: DoctorStage.PORT_BOUND,
-            ReceiverStage.PACKET_RECEIVED: DoctorStage.PACKET_RECEIVED,
+            ReceiverStage.DATAGRAM_RECEIVED: DoctorStage.DATAGRAM_RECEIVED,
+            ReceiverStage.VALID_PACKET: DoctorStage.VALID_PACKET,
             ReceiverStage.CODE_MATCHED: DoctorStage.CODE_MATCHED,
             ReceiverStage.ACK_SENT: DoctorStage.ACK_SENT,
         }
@@ -1170,6 +1576,7 @@ class NiwPspToPcApp:
 
     def close(self) -> None:
         self._closing = True
+        self._restart_pending = False
         if self._receiver is not None:
             self._receiver.request_stop()
         if self._controller_service is not None:

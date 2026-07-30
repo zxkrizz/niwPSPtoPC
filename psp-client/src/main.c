@@ -1,6 +1,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <kubridge.h>
 #include <pspctrl.h>
 #include <pspdisplay.h>
 #include <pspkernel.h>
@@ -15,6 +16,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <systemctrl.h>
 
 #include "config.h"
 #include "input_protocol.h"
@@ -23,7 +25,20 @@
 #define APP_NAME "niwPSPtoPC"
 #define MAX_NETWORK_PROFILES 16
 #define CONNECTION_TIMEOUT_US (30ULL * 1000ULL * 1000ULL)
+#define RECONNECT_ATTEMPT_TIMEOUT_US (8ULL * 1000ULL * 1000ULL)
+#define APCTL_STATE_CHECK_INTERVAL_US 250000ULL
+#define RECONNECT_BACKOFF_MAX_SECONDS 10U
 #define PAIRING_ACK_TIMEOUT_US 2000000ULL
+#define DISPLAY_SLEEP_DELAY_US (10ULL * 1000ULL * 1000ULL)
+#define MAX_ACK_DATAGRAMS_PER_CYCLE 32U
+#define PERFORMANCE_PLL_MHZ 333
+#define PERFORMANCE_CPU_MHZ 333
+#define PERFORMANCE_BUS_MHZ 166
+#define POWER_SAVE_PLL_MHZ 111
+#define POWER_SAVE_CPU_MHZ 111
+#define POWER_SAVE_BUS_MHZ 55
+#define DISPLAY_SET_BRIGHTNESS_NID 0x9E3C6DC6u
+#define DISPLAY_GET_BRIGHTNESS_NID 0x31C4BAA8u
 #define PAIRING_ALPHABET "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 #define DISCOVERY_IPV4 "255.255.255.255"
 
@@ -36,6 +51,112 @@ PSP_MAIN_THREAD_STACK_SIZE_KB(256);
  * global mutable state: it lets the main thread unwind sockets/network cleanly.
  */
 static volatile int g_exit_requested = 0;
+
+typedef struct BacklightControl {
+    uint32_t set_brightness_address;
+    uint32_t get_brightness_address;
+    int saved_brightness;
+    int is_off;
+} BacklightControl;
+
+static void backlight_init(BacklightControl *backlight)
+{
+    memset(backlight, 0, sizeof(*backlight));
+    backlight->set_brightness_address = sctrlHENFindFunction(
+        "sceDisplay_Service",
+        "sceDisplay_driver",
+        DISPLAY_SET_BRIGHTNESS_NID);
+    backlight->get_brightness_address = sctrlHENFindFunction(
+        "sceDisplay_Service",
+        "sceDisplay_driver",
+        DISPLAY_GET_BRIGHTNESS_NID);
+}
+
+static int call_display_get_brightness(
+    const BacklightControl *backlight,
+    int *level)
+{
+    KernelCallArg args;
+    int unknown = 0;
+
+    if (backlight->get_brightness_address == 0) {
+        return -1;
+    }
+    memset(&args, 0, sizeof(args));
+    args.arg1 = (uint32_t)(uintptr_t)level;
+    args.arg2 = (uint32_t)(uintptr_t)&unknown;
+    return kuKernelCall(
+        (void *)(uintptr_t)backlight->get_brightness_address,
+        &args);
+}
+
+static int call_display_set_brightness(
+    const BacklightControl *backlight,
+    int level)
+{
+    KernelCallArg args;
+
+    if (backlight->set_brightness_address == 0) {
+        return -1;
+    }
+    memset(&args, 0, sizeof(args));
+    args.arg1 = (uint32_t)level;
+    args.arg2 = 0;
+    return kuKernelCall(
+        (void *)(uintptr_t)backlight->set_brightness_address,
+        &args);
+}
+
+static void backlight_turn_off(BacklightControl *backlight)
+{
+    int current_brightness = 0;
+
+    if (backlight->is_off) {
+        return;
+    }
+    if (
+        call_display_get_brightness(backlight, &current_brightness) < 0 ||
+        current_brightness < 1 ||
+        current_brightness > 100
+    ) {
+        return;
+    }
+    if (call_display_set_brightness(backlight, 0) >= 0) {
+        backlight->saved_brightness = current_brightness;
+        backlight->is_off = 1;
+    }
+}
+
+static void backlight_turn_on(BacklightControl *backlight)
+{
+    if (!backlight->is_off) {
+        return;
+    }
+    if (
+        call_display_set_brightness(
+            backlight,
+            backlight->saved_brightness
+        ) >= 0
+    ) {
+        backlight->is_off = 0;
+    }
+}
+
+static int set_performance_clock(void)
+{
+    return scePowerSetClockFrequency(
+        PERFORMANCE_PLL_MHZ,
+        PERFORMANCE_CPU_MHZ,
+        PERFORMANCE_BUS_MHZ);
+}
+
+static int set_power_save_clock(void)
+{
+    return scePowerSetClockFrequency(
+        POWER_SAVE_PLL_MHZ,
+        POWER_SAVE_CPU_MHZ,
+        POWER_SAVE_BUS_MHZ);
+}
 
 static uint32_t generate_session_token(void)
 {
@@ -146,6 +267,15 @@ static uint32_t map_buttons(uint32_t psp_buttons)
     return buttons;
 }
 
+static int sample_sender_controller(SceCtrlData *pad)
+{
+#ifdef NIW_SENDER_USE_READ
+    return sceCtrlReadBufferPositive(pad, 1);
+#else
+    return sceCtrlPeekBufferPositive(pad, 1);
+#endif
+}
+
 static int collect_network_profiles(int profiles[MAX_NETWORK_PROFILES])
 {
     int profile_id;
@@ -254,7 +384,9 @@ static int connect_wifi(
     int profile_id,
     const char *pairing_code,
     char local_ip[16],
-    int *last_error)
+    int *last_error,
+    uint64_t timeout_us,
+    unsigned int reconnect_attempt)
 {
     uint64_t start_time;
     int previous_state = -1;
@@ -277,10 +409,18 @@ static int connect_wifi(
         }
 
         if (state != previous_state) {
-            ui_render_connecting(
-                pairing_code,
-                apctl_state_name(state),
-                state);
+            if (reconnect_attempt > 0) {
+                ui_render_reconnecting(
+                    pairing_code,
+                    apctl_state_name(state),
+                    reconnect_attempt,
+                    0);
+            } else {
+                ui_render_connecting(
+                    pairing_code,
+                    apctl_state_name(state),
+                    state);
+            }
             previous_state = state;
         }
         if (state == PSP_NET_APCTL_STATE_GOT_IP) {
@@ -296,7 +436,7 @@ static int connect_wifi(
         }
 
         now = (uint64_t)sceKernelGetSystemTimeWide();
-        if (now - start_time >= CONNECTION_TIMEOUT_US) {
+        if (now - start_time >= timeout_us) {
             *last_error = -1;
             return -1;
         }
@@ -364,12 +504,102 @@ static void render_sender_status(
     ui_render_sender(pairing_code, authorized, network_error, send_rate);
 }
 
+static int wait_for_reconnect_backoff(
+    const char *pairing_code,
+    unsigned int attempt,
+    unsigned int seconds)
+{
+    unsigned int remaining;
+
+    for (remaining = seconds; remaining > 0 && !g_exit_requested; --remaining) {
+        unsigned int slice;
+        ui_render_reconnecting(
+            pairing_code,
+            "ACCESS POINT NOT AVAILABLE",
+            attempt,
+            remaining);
+        for (slice = 0; slice < 10 && !g_exit_requested; ++slice) {
+            sceKernelDelayThread(100000);
+        }
+    }
+    return g_exit_requested ? -1 : 0;
+}
+
+static int reconnect_wifi_and_socket(
+    int profile_id,
+    const char *pairing_code,
+    char local_ip[16],
+    const NiwPspToPcConfig *config,
+    int *socket_fd,
+    struct sockaddr_in *server_address,
+    int *last_error)
+{
+    unsigned int attempt = 1;
+    unsigned int backoff_seconds = 1;
+
+    if (*socket_fd >= 0) {
+        close(*socket_fd);
+        *socket_fd = -1;
+    }
+    sceNetApctlDisconnect();
+
+    while (!g_exit_requested) {
+        if (
+            wait_for_reconnect_backoff(
+                pairing_code,
+                attempt,
+                backoff_seconds
+            ) < 0
+        ) {
+            return -1;
+        }
+
+        /*
+         * APCTL can retain a half-open association after an access point
+         * disappears. Start every attempt from a known disconnected state.
+         */
+        sceNetApctlDisconnect();
+        sceKernelDelayThread(100000);
+        if (
+            connect_wifi(
+                profile_id,
+                pairing_code,
+                local_ip,
+                last_error,
+                RECONNECT_ATTEMPT_TIMEOUT_US,
+                attempt
+            ) == 0
+        ) {
+            *last_error = create_udp_socket(
+                config,
+                socket_fd,
+                server_address);
+            if (*last_error == 0) {
+                return 0;
+            }
+            sceNetApctlDisconnect();
+        }
+
+        ++attempt;
+        if (backoff_seconds < RECONNECT_BACKOFF_MAX_SECONDS) {
+            backoff_seconds *= 2;
+            if (backoff_seconds > RECONNECT_BACKOFF_MAX_SECONDS) {
+                backoff_seconds = RECONNECT_BACKOFF_MAX_SECONDS;
+            }
+        }
+    }
+    return -1;
+}
+
 static void run_controller_sender(
-    int socket_fd,
+    int *socket_fd,
     struct sockaddr_in *server_address,
     const NiwPspToPcConfig *config,
+    int profile_id,
+    char local_ip[16],
     uint32_t session_token,
-    const char *pairing_code)
+    const char *pairing_code,
+    BacklightControl *backlight)
 {
     uint8_t packet_buffer[PSP_INPUT_PACKET_SIZE];
     uint8_t ack_buffer[PSP_PAIRING_ACK_SIZE];
@@ -380,7 +610,9 @@ static void run_controller_sender(
         (1000000ULL + (uint64_t)config->send_rate - 1ULL) /
         (uint64_t)config->send_rate;
     uint64_t next_send = (uint64_t)sceKernelGetSystemTimeWide();
+    uint64_t next_apctl_check = next_send;
     uint64_t last_pairing_ack = 0;
+    uint64_t display_sleep_due = 0;
     int authorized = 0;
     int last_network_error = 0;
     int rendered_authorized = -1;
@@ -393,14 +625,65 @@ static void run_controller_sender(
         uint64_t now = (uint64_t)sceKernelGetSystemTimeWide();
         ssize_t bytes_sent;
 
+        if (now >= next_apctl_check) {
+            int apctl_state = PSP_NET_APCTL_STATE_DISCONNECTED;
+            int apctl_result = sceNetApctlGetState(&apctl_state);
+
+            next_apctl_check = now + APCTL_STATE_CHECK_INTERVAL_US;
+            if (
+                apctl_result < 0 ||
+                apctl_state != PSP_NET_APCTL_STATE_GOT_IP
+            ) {
+                backlight_turn_on(backlight);
+                /*
+                 * Reconnection and discovery are short-lived and benefit from
+                 * the full clock. A failed clock change is non-fatal; the
+                 * current firmware-selected profile remains usable.
+                 */
+                set_performance_clock();
+                last_network_error =
+                    apctl_result < 0 ? apctl_result : apctl_state;
+                authorized = 0;
+                last_pairing_ack = 0;
+                reset_pc_discovery(server_address);
+                if (
+                    reconnect_wifi_and_socket(
+                        profile_id,
+                        pairing_code,
+                        local_ip,
+                        config,
+                        socket_fd,
+                        server_address,
+                        &last_network_error
+                    ) < 0
+                ) {
+                    return;
+                }
+                now = (uint64_t)sceKernelGetSystemTimeWide();
+                next_send = now;
+                next_apctl_check =
+                    now + APCTL_STATE_CHECK_INTERVAL_US;
+                last_network_error = 0;
+                rendered_authorized = -1;
+                rendered_network_error = -1;
+            }
+        }
+
         if (now < next_send) {
             sceKernelDelayThread((SceUInt)(next_send - now));
             continue;
         }
 
-        if (sceCtrlReadBufferPositive(&pad, 1) <= 0) {
+        if (sample_sender_controller(&pad) <= 0) {
             last_network_error = -3;
         } else {
+            if (
+                backlight->is_off &&
+                (pad.Buttons & (PSP_CTRL_HOME | PSP_CTRL_SCREEN)) != 0
+            ) {
+                backlight_turn_on(backlight);
+                display_sleep_due = now + DISPLAY_SLEEP_DELAY_US;
+            }
             input.sequence = sequence;
             input.buttons = map_buttons(pad.Buttons);
             input.analog_x = pad.Lx;
@@ -410,7 +693,7 @@ static void run_controller_sender(
             psp_input_encode(packet_buffer, &input);
 
             bytes_sent = sendto(
-                socket_fd,
+                *socket_fd,
                 packet_buffer,
                 sizeof(packet_buffer),
                 0,
@@ -425,45 +708,77 @@ static void run_controller_sender(
             }
         }
 
-        for (;;) {
-            struct sockaddr_in ack_address;
-            socklen_t ack_address_size = sizeof(ack_address);
-            ssize_t bytes_received;
+        {
+            unsigned int ack_count;
 
-            memset(&ack_address, 0, sizeof(ack_address));
-            bytes_received = recvfrom(
-                socket_fd,
-                ack_buffer,
-                sizeof(ack_buffer),
-                0,
-                (struct sockaddr *)&ack_address,
-                &ack_address_size);
-            if (bytes_received <= 0) {
-                break;
-            }
-            if (bytes_received == (ssize_t)sizeof(ack_buffer) &&
-                ack_address.sin_port == htons(config->server_port) &&
-                (
-                    server_address->sin_addr.s_addr ==
-                        htonl(INADDR_BROADCAST) ||
-                    ack_address.sin_addr.s_addr ==
-                        server_address->sin_addr.s_addr
-                ) &&
-                psp_pairing_ack_matches(ack_buffer, session_token)) {
-                /*
-                 * Before pairing the destination is the limited broadcast
-                 * address. The ACK source identifies the receiver PC and
-                 * becomes the unicast destination for subsequent input.
-                 */
-                server_address->sin_addr = ack_address.sin_addr;
-                last_pairing_ack = now;
-                authorized = 1;
+            /*
+             * Bound receive work so a UDP flood cannot trap the sender in the
+             * nonblocking drain loop and keep the PSP continuously busy.
+             */
+            for (
+                ack_count = 0;
+                ack_count < MAX_ACK_DATAGRAMS_PER_CYCLE;
+                ++ack_count
+            ) {
+                struct sockaddr_in ack_address;
+                socklen_t ack_address_size = sizeof(ack_address);
+                ssize_t bytes_received;
+
+                memset(&ack_address, 0, sizeof(ack_address));
+                bytes_received = recvfrom(
+                    *socket_fd,
+                    ack_buffer,
+                    sizeof(ack_buffer),
+                    0,
+                    (struct sockaddr *)&ack_address,
+                    &ack_address_size);
+                if (bytes_received <= 0) {
+                    break;
+                }
+                if (bytes_received == (ssize_t)sizeof(ack_buffer) &&
+                    ack_address.sin_port == htons(config->server_port) &&
+                    (
+                        server_address->sin_addr.s_addr ==
+                            htonl(INADDR_BROADCAST) ||
+                        ack_address.sin_addr.s_addr ==
+                            server_address->sin_addr.s_addr
+                    ) &&
+                    psp_pairing_ack_matches(ack_buffer, session_token)) {
+                    /*
+                     * Before pairing the destination is the limited broadcast
+                     * address. The ACK source identifies the receiver PC and
+                     * becomes the unicast destination for subsequent input.
+                     */
+                    server_address->sin_addr = ack_address.sin_addr;
+                    last_pairing_ack = now;
+                    if (!authorized) {
+                        /*
+                         * The steady-state 60 Hz sender is lightweight. Drop to
+                         * a standard 111/55 MHz profile after authentication to
+                         * reduce heat and battery drain.
+                         */
+                        set_power_save_clock();
+                        display_sleep_due = now + DISPLAY_SLEEP_DELAY_US;
+                    }
+                    authorized = 1;
+                }
             }
         }
         if (authorized &&
             now - last_pairing_ack > PAIRING_ACK_TIMEOUT_US) {
+            backlight_turn_on(backlight);
+            set_performance_clock();
             authorized = 0;
+            display_sleep_due = 0;
             reset_pc_discovery(server_address);
+        }
+        if (
+            authorized &&
+            display_sleep_due != 0 &&
+            now >= display_sleep_due
+        ) {
+            backlight_turn_off(backlight);
+            display_sleep_due = 0;
         }
 
         next_send += period_us;
@@ -512,7 +827,9 @@ int main(int argc, char *argv[])
     uint32_t session_token;
     char pairing_code[6];
     char config_path[256];
+    BacklightControl backlight;
 
+    backlight_init(&backlight);
     ui_init();
     session_token = generate_session_token();
     format_session_token(session_token, pairing_code);
@@ -528,7 +845,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    error = scePowerSetClockFrequency(333, 333, 166);
+    error = set_performance_clock();
     if (error != 0) {
         show_fatal_error(
             pairing_code,
@@ -628,7 +945,16 @@ int main(int argc, char *argv[])
     }
     inet_initialized = 1;
 
-    if (connect_wifi(profile_id, pairing_code, local_ip, &error) < 0) {
+    if (
+        connect_wifi(
+            profile_id,
+            pairing_code,
+            local_ip,
+            &error,
+            CONNECTION_TIMEOUT_US,
+            0
+        ) < 0
+    ) {
         if (!g_exit_requested) {
             show_fatal_error(
                 pairing_code,
@@ -652,13 +978,17 @@ int main(int argc, char *argv[])
     }
 
     run_controller_sender(
-        socket_fd,
+        &socket_fd,
         &server_address,
         &config,
+        profile_id,
+        local_ip,
         session_token,
-        pairing_code);
+        pairing_code,
+        &backlight);
 
 cleanup:
+    backlight_turn_on(&backlight);
     ui_render_shutdown(pairing_code);
     if (socket_fd >= 0) {
         close(socket_fd);

@@ -1,4 +1,4 @@
-niwPSPtoPC 1.0.1 for Windows
+niwPSPtoPC 1.1.0 for Windows
 =============================
 
 1. Install the final ViGEmBus 1.22.0 driver:
@@ -7,9 +7,13 @@ niwPSPtoPC 1.0.1 for Windows
 3. Start niwPSPtoPC.exe and allow private-network access if Windows asks.
 4. Start niwPSPtoPC on the PSP and enter its five-character code.
 
-Connection Doctor reports each network, pairing and ViGEmBus milestone. Guest
-Wi-Fi often enables client isolation; use a network that allows PSP-to-PC
-traffic.
+Connection Doctor 2.0 reports network interfaces, profile/firewall state, UDP
+health, pairing and gamepad milestones. Use SETTINGS to change the UDP bind,
+port or PSP IP allowlist. Use RETRY GAMEPAD after correcting a driver error;
+the first failure also gets one automatic retry.
+
+Guest Wi-Fi often enables client isolation; use a network that allows
+PSP-to-PC traffic.
 
 The PSP discovers this PC automatically. Do not expose UDP 47999 to the
 Internet.

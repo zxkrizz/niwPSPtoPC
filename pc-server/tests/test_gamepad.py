@@ -4,10 +4,12 @@ import threading
 import unittest
 
 from pc_server.gamepad import (
+    BackendFailureKind,
     ControllerEventType,
     ControllerService,
-    XInputButtons,
+    GamepadBackendError,
     Xbox360State,
+    XInputButtons,
     map_packet_to_xbox360,
 )
 from pc_server.protocol import Buttons, InputPacket
@@ -16,7 +18,6 @@ from pc_server.receiver import (
     SequenceEvent,
     SequenceResult,
 )
-
 
 ADDRESS = ("10.0.0.33", 51060)
 
@@ -213,6 +214,69 @@ class ControllerServiceTests(unittest.TestCase):
             self.events[-1].event,
             ControllerEventType.GAMEPAD_READY,
         )
+
+    def test_manual_retry_recovers_backend_without_restarting_service(self) -> None:
+        attempts = 0
+
+        def factory() -> FakeBackend:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise GamepadBackendError(
+                    BackendFailureKind.MISSING_DRIVER,
+                    "driver missing",
+                )
+            return self.backend
+
+        service = ControllerService(
+            factory,
+            on_event=self.events.append,
+            clock=self.clock,
+            start_watchdog=False,
+        )
+        try:
+            self.assertFalse(service.ensure_backend())
+            self.assertEqual(
+                service.backend_failure,
+                BackendFailureKind.MISSING_DRIVER,
+            )
+
+            self.assertTrue(service.retry_backend())
+
+            self.assertTrue(service.gamepad_ready)
+            self.assertEqual(attempts, 2)
+            self.assertEqual(
+                [event.event for event in self.events[-2:]],
+                [ControllerEventType.ERROR, ControllerEventType.GAMEPAD_READY],
+            )
+        finally:
+            service.stop()
+
+    def test_backend_automatically_retries_once_after_delay(self) -> None:
+        attempts = 0
+
+        def factory() -> FakeBackend:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("driver temporarily unavailable")
+            return self.backend
+
+        service = ControllerService(
+            factory,
+            on_event=self.events.append,
+            clock=self.clock,
+            start_watchdog=False,
+            backend_retry_delay_s=3.0,
+        )
+        try:
+            self.assertFalse(service.ensure_backend())
+            self.assertFalse(service.check_backend_retry(self.clock.now + 2.9))
+            self.assertTrue(service.check_backend_retry(self.clock.now + 3.0))
+            self.assertEqual(attempts, 2)
+            self.assertTrue(service.gamepad_ready)
+        finally:
+            service.stop()
 
     def test_watchdog_runs_without_frontend_polling(self) -> None:
         backend = FakeBackend()

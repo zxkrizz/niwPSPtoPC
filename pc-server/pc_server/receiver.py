@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from collections import deque
-from dataclasses import dataclass, field
-from enum import Enum
 import logging
 import socket
 import threading
 import time
-from typing import Callable
+from collections import OrderedDict, deque
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from enum import Enum
 
 from .display import ControllerDisplay
 from .protocol import (
@@ -27,6 +27,8 @@ MAX_CLOCK_SKEW_US = 5 * 60 * 1_000_000
 DEFAULT_ACTIVE_CLIENT_TIMEOUT_S = 1.75
 DEFAULT_CLIENT_RETENTION_S = 10.0
 PAIRING_ACK_INTERVAL_S = 0.1
+REJECTION_CACHE_MAX_ENTRIES = 128
+REJECTION_CACHE_TTL_S = 10.0
 
 
 class SequenceEvent(Enum):
@@ -39,7 +41,8 @@ class SequenceEvent(Enum):
 
 class ReceiverStage(Enum):
     PORT_BOUND = "port-bound"
-    PACKET_RECEIVED = "packet-received"
+    DATAGRAM_RECEIVED = "datagram-received"
+    VALID_PACKET = "valid-packet"
     CODE_MATCHED = "code-matched"
     ACK_SENT = "ack-sent"
 
@@ -133,6 +136,20 @@ class ReceiverSnapshot:
     is_state_update: bool
 
 
+@dataclass(frozen=True, slots=True)
+class ReceiverMetrics:
+    """Thread-safe counters used by Connection Doctor and reports."""
+
+    datagrams_received: int
+    valid_packets: int
+    rejected_datagrams: int
+    pairing_rejections: int
+    callback_errors: int
+    last_datagram_age_s: float | None
+    packets_per_second: float
+    loss_percent: float
+
+
 def estimate_latency_ms(
     packet_timestamp_us: int, arrival_epoch_us: int | None = None
 ) -> float | None:
@@ -193,9 +210,21 @@ class UdpReceiver:
         self._clients: dict[tuple[str, int], ClientState] = {}
         self._active_client: tuple[str, int] | None = None
         self._blocked_clients: set[tuple[str, int]] = set()
-        self._rejected_hosts: set[str] = set()
-        self._rejected_pairings: set[tuple[str, int | None]] = set()
+        self._rejected_hosts: OrderedDict[str, float] = OrderedDict()
+        self._rejected_pairings: OrderedDict[
+            tuple[str, int | None], float
+        ] = OrderedDict()
+        self._rejection_logs: OrderedDict[tuple[object, ...], float] = (
+            OrderedDict()
+        )
         self._last_ack_sent: dict[tuple[str, int], float] = {}
+        self._datagrams_received = 0
+        self._valid_packets = 0
+        self._rejected_datagrams = 0
+        self._pairing_rejections = 0
+        self._last_datagram_at: float | None = None
+        self._callback_errors = 0
+        self._callback_error_counts: dict[str, int] = {}
         self._clients_lock = threading.RLock()
         self._stop_event = threading.Event()
 
@@ -213,6 +242,71 @@ class UdpReceiver:
     def pairing_token(self) -> int | None:
         with self._clients_lock:
             return self._pairing_token
+
+    @property
+    def callback_error_count(self) -> int:
+        with self._clients_lock:
+            return self._callback_errors
+
+    @property
+    def rejected_pairing_cache_size(self) -> int:
+        with self._clients_lock:
+            self._expire_cache_locked(
+                self._rejected_pairings,
+                time.monotonic(),
+            )
+            return len(self._rejected_pairings)
+
+    def metrics(self, *, now: float | None = None) -> ReceiverMetrics:
+        checked_at = time.monotonic() if now is None else now
+        with self._clients_lock:
+            active_state = (
+                self._clients.get(self._active_client)
+                if self._active_client is not None
+                else None
+            )
+            if active_state is not None:
+                cutoff = checked_at - 1.0
+                while (
+                    active_state.rate.arrivals
+                    and active_state.rate.arrivals[0] < cutoff
+                ):
+                    active_state.rate.arrivals.popleft()
+            packets_per_second = (
+                float(len(active_state.rate.arrivals))
+                if active_state is not None
+                else 0.0
+            )
+            received = (
+                active_state.sequences.received
+                if active_state is not None
+                else 0
+            )
+            lost = (
+                active_state.sequences.lost
+                if active_state is not None
+                else 0
+            )
+            loss_percent = (
+                (lost * 100.0) / (received + lost)
+                if received + lost > 0
+                else 0.0
+            )
+            age = (
+                max(0.0, checked_at - self._last_datagram_at)
+                if self._last_datagram_at is not None
+                else None
+            )
+            return ReceiverMetrics(
+                datagrams_received=self._datagrams_received,
+                valid_packets=self._valid_packets,
+                rejected_datagrams=self._rejected_datagrams,
+                pairing_rejections=self._pairing_rejections,
+                callback_errors=self._callback_errors,
+                last_datagram_age_s=age,
+                packets_per_second=packets_per_second,
+                loss_percent=loss_percent,
+            )
 
     def set_pairing_token(self, pairing_token: int | None) -> None:
         """Replace the authorized session and forget all previous clients."""
@@ -250,10 +344,11 @@ class UdpReceiver:
                     listening_address[0],
                     listening_address[1],
                 )
-                if self.on_listening is not None:
-                    self.on_listening(
-                        (listening_address[0], listening_address[1])
-                    )
+                self._invoke_callback(
+                    "on_listening",
+                    self.on_listening,
+                    (listening_address[0], listening_address[1]),
+                )
                 self._emit_stage(
                     ReceiverStage.PORT_BOUND,
                     (listening_address[0], listening_address[1]),
@@ -262,17 +357,24 @@ class UdpReceiver:
                 while not self._stop_event.is_set():
                     try:
                         data, address = sock.recvfrom(2048)
-                    except socket.timeout:
+                    except TimeoutError:
                         self._maintain_clients(time.monotonic())
                         continue
 
-                    self._emit_stage(ReceiverStage.PACKET_RECEIVED, address)
+                    received_at = time.monotonic()
+                    with self._clients_lock:
+                        self._datagrams_received += 1
+                        self._last_datagram_at = received_at
+                    self._emit_stage(ReceiverStage.DATAGRAM_RECEIVED, address)
                     try:
                         packet = decode_packet(data)
                     except PacketError as exc:
+                        with self._clients_lock:
+                            self._rejected_datagrams += 1
                         if self.display is not None:
                             self.display.break_line()
-                        LOGGER.warning(
+                        self._log_rejection(
+                            ("decode", address[0], str(exc)),
                             "Rejected %d-byte datagram from %s:%d: %s",
                             len(data),
                             address[0],
@@ -285,8 +387,14 @@ class UdpReceiver:
                         self.allowed_hosts is not None
                         and address[0] not in self.allowed_hosts
                     ):
-                        if address[0] not in self._rejected_hosts:
-                            self._rejected_hosts.add(address[0])
+                        with self._clients_lock:
+                            self._rejected_datagrams += 1
+                            should_log = self._remember_cache_entry_locked(
+                                self._rejected_hosts,
+                                address[0],
+                                received_at,
+                            )
+                        if should_log:
                             LOGGER.warning(
                                 "Ignoring client %s:%d: address is not allowed",
                                 address[0],
@@ -294,7 +402,13 @@ class UdpReceiver:
                             )
                         continue
 
+                    self._emit_stage(ReceiverStage.VALID_PACKET, address)
                     snapshot = self._handle_packet(packet, address)
+                    with self._clients_lock:
+                        if snapshot is None:
+                            self._rejected_datagrams += 1
+                        else:
+                            self._valid_packets += 1
                     token_matches = (
                         self._pairing_token is not None
                         and packet.session_token == self._pairing_token
@@ -347,8 +461,12 @@ class UdpReceiver:
                 or packet.session_token != self._pairing_token
             ):
                 rejected = (address[0], packet.session_token)
-                if rejected not in self._rejected_pairings:
-                    self._rejected_pairings.add(rejected)
+                self._pairing_rejections += 1
+                if self._remember_cache_entry_locked(
+                    self._rejected_pairings,
+                    rejected,
+                    now_monotonic,
+                ):
                     LOGGER.info(
                         "Waiting for pairing: ignored session from %s:%d",
                         address[0],
@@ -421,7 +539,8 @@ class UdpReceiver:
         if sequence_result.event is SequenceEvent.GAP:
             if self.display is not None:
                 self.display.break_line()
-            LOGGER.warning(
+            self._log_rejection(
+                ("sequence-gap", address),
                 "Lost %d packet(s) from %s:%d before sequence %d",
                 sequence_result.lost,
                 address[0],
@@ -434,7 +553,8 @@ class UdpReceiver:
         }:
             if self.display is not None:
                 self.display.break_line()
-            LOGGER.warning(
+            self._log_rejection(
+                ("sequence", sequence_result.event.value, address),
                 "%s packet from %s:%d: sequence %d",
                 sequence_result.event.value,
                 address[0],
@@ -451,10 +571,17 @@ class UdpReceiver:
                 sequence_result=sequence_result,
                 tracker=state.sequences,
             )
-        if self.on_diagnostic is not None:
-            self.on_diagnostic(snapshot)
-        if self.on_packet is not None and is_state_update:
-            self.on_packet(snapshot)
+        self._invoke_callback(
+            "on_diagnostic",
+            self.on_diagnostic,
+            snapshot,
+        )
+        if is_state_update:
+            self._invoke_callback(
+                "on_packet",
+                self.on_packet,
+                snapshot,
+            )
         return snapshot
 
     def _maintain_clients(self, now: float) -> None:
@@ -487,9 +614,77 @@ class UdpReceiver:
         stage: ReceiverStage,
         address: tuple[str, int] | None = None,
     ) -> None:
-        if self.on_stage is None:
+        self._invoke_callback(
+            "on_stage",
+            self.on_stage,
+            ReceiverEvent(stage, address),
+        )
+
+    @staticmethod
+    def _expire_cache_locked(
+        cache: OrderedDict[object, float],
+        now: float,
+    ) -> None:
+        cutoff = now - REJECTION_CACHE_TTL_S
+        while cache:
+            _key, seen_at = next(iter(cache.items()))
+            if seen_at > cutoff:
+                break
+            cache.popitem(last=False)
+
+    def _remember_cache_entry_locked(
+        self,
+        cache: OrderedDict[object, float],
+        key: object,
+        now: float,
+    ) -> bool:
+        self._expire_cache_locked(cache, now)
+        if key in cache:
+            cache.move_to_end(key)
+            cache[key] = now
+            return False
+        cache[key] = now
+        while len(cache) > REJECTION_CACHE_MAX_ENTRIES:
+            cache.popitem(last=False)
+        return True
+
+    def _log_rejection(
+        self,
+        key: tuple[object, ...],
+        message: str,
+        *args: object,
+    ) -> None:
+        now = time.monotonic()
+        with self._clients_lock:
+            should_log = self._remember_cache_entry_locked(
+                self._rejection_logs,
+                key,
+                now,
+            )
+        if should_log:
+            LOGGER.warning(message, *args)
+
+    def _invoke_callback(
+        self,
+        name: str,
+        callback: Callable[[object], None] | None,
+        value: object,
+    ) -> None:
+        if callback is None:
             return
         try:
-            self.on_stage(ReceiverEvent(stage, address))
+            callback(value)
         except Exception:
-            LOGGER.exception("Receiver stage callback failed")
+            with self._clients_lock:
+                self._callback_errors += 1
+                count = self._callback_error_counts.get(name, 0) + 1
+                self._callback_error_counts[name] = count
+            # Preserve the first failures and exponentially spaced reminders
+            # without flooding logs at the controller packet rate.
+            if count <= 3 or count & (count - 1) == 0:
+                LOGGER.exception(
+                    "Receiver callback %s failed (%d failure%s)",
+                    name,
+                    count,
+                    "" if count == 1 else "s",
+                )

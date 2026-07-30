@@ -123,6 +123,7 @@ $License = Join-Path $ProjectRoot "LICENSE"
 $Notices = Join-Path $ProjectRoot "THIRD_PARTY_NOTICES.txt"
 $WindowsReadme = Join-Path $ProjectRoot "packaging\README-WINDOWS.txt"
 $PspReadme = Join-Path $ProjectRoot "packaging\README-PSP.txt"
+$ReleaseNotes = Join-Path $ProjectRoot "docs\releases\$Version.md"
 
 foreach ($RequiredFile in @(
     $WindowsExecutable,
@@ -131,7 +132,8 @@ foreach ($RequiredFile in @(
     $License,
     $Notices,
     $WindowsReadme,
-    $PspReadme
+    $PspReadme,
+    $ReleaseNotes
 )) {
     if (-not (Test-Path -LiteralPath $RequiredFile -PathType Leaf)) {
         throw "Required release file is missing: $RequiredFile"
@@ -215,12 +217,16 @@ Copy-Item -LiteralPath $WindowsReadme `
     -Destination (Join-Path $WindowsStage "README.txt")
 Copy-Item -LiteralPath $License -Destination $WindowsStage
 Copy-Item -LiteralPath $Notices -Destination $WindowsStage
+Copy-Item -LiteralPath $ReleaseNotes `
+    -Destination (Join-Path $WindowsStage "RELEASE-NOTES.md")
 
 Copy-Item -LiteralPath $PspEboot -Destination $PspStage
 Copy-Item -LiteralPath $PspConfig -Destination $PspStage
 Copy-Item -LiteralPath $PspReadme `
     -Destination (Join-Path $PspStage "README.txt")
 Copy-Item -LiteralPath $License -Destination $PspStage
+Copy-Item -LiteralPath $ReleaseNotes `
+    -Destination (Join-Path $PspStage "RELEASE-NOTES.md")
 
 $WindowsArchive = Join-Path `
     $ReleaseRoot `
