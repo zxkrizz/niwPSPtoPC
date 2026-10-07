@@ -2,7 +2,7 @@
 
 All notable public changes are documented here.
 
-## 1.2.0 — 2026-07-30
+## 1.2.0 — 2026-10-07
 
 - promoted wired USB input from a development preview to a supported
   transport after physical PSP-2004 validation;
