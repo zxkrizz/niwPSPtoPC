@@ -1,5 +1,5 @@
 TARGET = niw_psp_to_pc
-OBJS = src/main.o src/config.o src/input_protocol.o src/ui.o
+OBJS = src/main.o src/config.o src/input_protocol.o src/ui.o src/usb_transport.o
 
 INCDIR = include
 CFLAGS = -O2 -G0 -Wall -Wextra -std=c11
@@ -21,7 +21,7 @@ EXTRA_TARGETS = EBOOT.PBP
 
 # build.mak and the PSP compiler specs provide the standard user/network/
 # utility stubs. Power, WLAN and CFW user/kernel bridges need explicit libs.
-LIBS = -lpsppower -lpspwlan -lpspsystemctrl_user -lpspkubridge
+LIBS = -lpsppower -lpspwlan -lpspusb -lpspsystemctrl_user -lpspkubridge
 
 PSPSDK := $(shell psp-config --pspsdk-path)
 include $(PSPSDK)/lib/build.mak

@@ -1,9 +1,10 @@
 # niwPSPtoPC Windows application
 
-The Windows application receives paired PSP input over UDP and exposes it as
-an Xbox 360 controller. Its GUI contains pairing state, a live pixel-art input
+The Ultimate Wireless and Wired Gamepad Windows application receives PSP input
+over USB or Wi-Fi and exposes it as one Xbox 360 controller. Its GUI contains
+large transport selectors, transport-specific setup, a live pixel-art input
 view, editable bind/port/allowlist settings, recoverable gamepad preflight and
-Connection Doctor 2.0 with native Windows network checks and live UDP metrics.
+Connection Doctor with native Windows network checks and live UDP metrics.
 
 ## Requirements
 
@@ -23,9 +24,15 @@ python -m pip install -e ".[windows]"
 python -m pc_server.gui
 ```
 
-The receiver listens on `0.0.0.0:47999` by default. The PSP broadcasts only
-while discovering the receiver; after the correct five-character code is
-entered, the pairing ACK identifies the PC and the PSP switches to unicast.
+The USB receiver and Wi-Fi receiver run together. USB uses the physical cable
+as authorization and requires no code. The Wi-Fi receiver listens on
+`0.0.0.0:47999` by default. The PSP broadcasts only while discovering the
+receiver; after the correct five-character code is entered, the pairing ACK
+identifies the PC and the PSP switches to unicast.
+
+Windows 10/11 uses its Microsoft-signed inbox WinUSB driver for the cable
+transport. Do not install Zadig. See [`../docs/usb.md`](../docs/usb.md) for
+driver setup and troubleshooting.
 
 Build the standalone executable with:
 

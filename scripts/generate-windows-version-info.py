@@ -44,7 +44,7 @@ def main() -> int:
         '040904B0',
         [
           StringStruct('CompanyName', 'niwPSPtoPC contributors'),
-          StringStruct('FileDescription', 'niwPSPtoPC PSP Wi-Fi Controller'),
+          StringStruct('FileDescription', 'Ultimate Wireless and Wired Gamepad'),
           StringStruct('FileVersion', '{__version__}'),
           StringStruct('InternalName', 'niwPSPtoPC'),
           StringStruct('LegalCopyright', 'MIT License'),

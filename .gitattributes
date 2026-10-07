@@ -11,3 +11,6 @@ Makefile text eol=lf
 *.md text eol=lf
 *.txt text eol=lf
 *.ps1 text eol=crlf
+
+# Preserve whitespace in vendored patches so their upstream context stays exact.
+psp-client/vendor/*.patch -whitespace

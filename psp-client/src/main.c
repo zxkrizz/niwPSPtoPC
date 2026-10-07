@@ -21,6 +21,7 @@
 #include "config.h"
 #include "input_protocol.h"
 #include "ui.h"
+#include "usb_transport.h"
 
 #define APP_NAME "niwPSPtoPC"
 #define MAX_NETWORK_PROFILES 16
@@ -41,6 +42,14 @@
 #define DISPLAY_GET_BRIGHTNESS_NID 0x31C4BAA8u
 #define PAIRING_ALPHABET "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 #define DISCOVERY_IPV4 "255.255.255.255"
+#define LINK_MENU_CHORD \
+    (PSP_CTRL_LTRIGGER | PSP_CTRL_RTRIGGER | PSP_CTRL_START)
+#define LINK_MENU_HOLD_US 750000ULL
+#define LINK_USB 0
+#define LINK_WIFI 1
+#define LINK_RESULT_STOP 0
+#define LINK_RESULT_MENU 1
+#define CONNECT_RESULT_MENU -2
 
 PSP_MODULE_INFO(APP_NAME, 0, 1, 0);
 PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER);
@@ -276,6 +285,95 @@ static int sample_sender_controller(SceCtrlData *pad)
 #endif
 }
 
+static int link_menu_chord_held(
+    uint32_t buttons,
+    uint64_t now,
+    uint64_t *held_since)
+{
+    if ((buttons & LINK_MENU_CHORD) != LINK_MENU_CHORD) {
+        *held_since = 0;
+        return 0;
+    }
+    if (*held_since == 0) {
+        *held_since = now;
+        return 0;
+    }
+    return now - *held_since >= LINK_MENU_HOLD_US;
+}
+
+static void wait_for_button_release(uint32_t buttons)
+{
+    SceCtrlData pad;
+
+    memset(&pad, 0, sizeof(pad));
+    while (!g_exit_requested) {
+        if (
+            sceCtrlPeekBufferPositive(&pad, 1) <= 0 ||
+            (pad.Buttons & buttons) == 0
+        ) {
+            return;
+        }
+        sceDisplayWaitVblankStart();
+    }
+}
+
+static int select_transport(int initial_selection)
+{
+    int selected = initial_selection == LINK_WIFI ? LINK_WIFI : LINK_USB;
+    int rendered_selection = -1;
+    int rendered_wifi_available = -1;
+    uint32_t previous_buttons = 0;
+    SceCtrlData pad;
+
+    memset(&pad, 0, sizeof(pad));
+    while (!g_exit_requested) {
+        int wifi_available = sceWlanGetSwitchState() != 0;
+        int read_count;
+
+        if (!wifi_available && selected == LINK_WIFI) {
+            selected = LINK_USB;
+        }
+        if (
+            selected != rendered_selection ||
+            wifi_available != rendered_wifi_available
+        ) {
+            ui_render_transport_selector(selected, wifi_available);
+            rendered_selection = selected;
+            rendered_wifi_available = wifi_available;
+        }
+
+        read_count = sceCtrlReadBufferPositive(&pad, 1);
+        if (read_count > 0) {
+            uint32_t pressed = pad.Buttons & ~previous_buttons;
+            previous_buttons = pad.Buttons;
+            if (
+                wifi_available &&
+                (pressed & (PSP_CTRL_LEFT | PSP_CTRL_RIGHT)) != 0
+            ) {
+                selected =
+                    selected == LINK_USB ? LINK_WIFI : LINK_USB;
+            }
+            if ((pressed & PSP_CTRL_CROSS) != 0) {
+                wait_for_button_release(PSP_CTRL_CROSS);
+                return selected;
+            }
+        }
+        sceDisplayWaitVblankStart();
+    }
+    return -1;
+}
+
+static int link_menu_button_pressed(void)
+{
+    SceCtrlData pad;
+
+    memset(&pad, 0, sizeof(pad));
+    if (sceCtrlPeekBufferPositive(&pad, 1) <= 0) {
+        return 0;
+    }
+    return (pad.Buttons & PSP_CTRL_CIRCLE) != 0;
+}
+
 static int collect_network_profiles(int profiles[MAX_NETWORK_PROFILES])
 {
     int profile_id;
@@ -318,10 +416,15 @@ static int select_network_profile(const char *pairing_code)
 
     if (profile_count == 0) {
         ui_render_no_profiles(pairing_code);
-        while (!g_exit_requested) {
-            sceKernelDelayThread(100000);
+        while (
+            !g_exit_requested &&
+            sceWlanGetSwitchState() != 0 &&
+            !link_menu_button_pressed()
+        ) {
+            sceKernelDelayThread(50000);
         }
-        return -1;
+        wait_for_button_release(PSP_CTRL_CIRCLE);
+        return g_exit_requested ? -1 : CONNECT_RESULT_MENU;
     }
 
     while (!g_exit_requested) {
@@ -350,8 +453,16 @@ static int select_network_profile(const char *pairing_code)
                 redraw = 1;
             }
             if ((pressed & PSP_CTRL_CROSS) != 0) {
+                wait_for_button_release(PSP_CTRL_CROSS);
                 return profiles[selected];
             }
+            if ((pressed & PSP_CTRL_CIRCLE) != 0) {
+                wait_for_button_release(PSP_CTRL_CIRCLE);
+                return CONNECT_RESULT_MENU;
+            }
+        }
+        if (sceWlanGetSwitchState() == 0) {
+            return CONNECT_RESULT_MENU;
         }
         sceDisplayWaitVblankStart();
     }
@@ -390,7 +501,15 @@ static int connect_wifi(
 {
     uint64_t start_time;
     int previous_state = -1;
-    int result = sceNetApctlConnect(profile_id);
+    int result;
+
+    if (
+        sceWlanGetSwitchState() == 0 ||
+        link_menu_button_pressed()
+    ) {
+        return CONNECT_RESULT_MENU;
+    }
+    result = sceNetApctlConnect(profile_id);
 
     if (result < 0) {
         *last_error = result;
@@ -402,6 +521,14 @@ static int connect_wifi(
         uint64_t now;
         int state = PSP_NET_APCTL_STATE_DISCONNECTED;
 
+        if (
+            sceWlanGetSwitchState() == 0 ||
+            link_menu_button_pressed()
+        ) {
+            sceNetApctlDisconnect();
+            wait_for_button_release(PSP_CTRL_CIRCLE);
+            return CONNECT_RESULT_MENU;
+        }
         result = sceNetApctlGetState(&state);
         if (result < 0) {
             *last_error = result;
@@ -499,9 +626,32 @@ static void render_sender_status(
     const char *pairing_code,
     int authorized,
     int network_error,
-    unsigned int send_rate)
+    unsigned int send_rate,
+    int is_usb)
 {
-    ui_render_sender(pairing_code, authorized, network_error, send_rate);
+    ui_render_sender(
+        pairing_code,
+        authorized,
+        network_error,
+        send_rate,
+        is_usb);
+}
+
+static void encode_neutral_input(
+    uint8_t output[PSP_INPUT_PACKET_SIZE],
+    uint32_t sequence,
+    uint32_t session_token,
+    uint64_t timestamp_us)
+{
+    PspInputState input;
+
+    memset(&input, 0, sizeof(input));
+    input.sequence = sequence;
+    input.analog_x = 128;
+    input.analog_y = 128;
+    input.session_token = session_token;
+    input.timestamp_us = timestamp_us;
+    psp_input_encode(output, &input);
 }
 
 static int wait_for_reconnect_backoff(
@@ -519,6 +669,13 @@ static int wait_for_reconnect_backoff(
             attempt,
             remaining);
         for (slice = 0; slice < 10 && !g_exit_requested; ++slice) {
+            if (
+                sceWlanGetSwitchState() == 0 ||
+                link_menu_button_pressed()
+            ) {
+                wait_for_button_release(PSP_CTRL_CIRCLE);
+                return CONNECT_RESULT_MENU;
+            }
             sceKernelDelayThread(100000);
         }
     }
@@ -544,14 +701,14 @@ static int reconnect_wifi_and_socket(
     sceNetApctlDisconnect();
 
     while (!g_exit_requested) {
-        if (
-            wait_for_reconnect_backoff(
+        {
+            int wait_result = wait_for_reconnect_backoff(
                 pairing_code,
                 attempt,
-                backoff_seconds
-            ) < 0
-        ) {
-            return -1;
+                backoff_seconds);
+            if (wait_result != 0) {
+                return wait_result;
+            }
         }
 
         /*
@@ -560,24 +717,27 @@ static int reconnect_wifi_and_socket(
          */
         sceNetApctlDisconnect();
         sceKernelDelayThread(100000);
-        if (
-            connect_wifi(
+        {
+            int connect_result = connect_wifi(
                 profile_id,
                 pairing_code,
                 local_ip,
                 last_error,
                 RECONNECT_ATTEMPT_TIMEOUT_US,
-                attempt
-            ) == 0
-        ) {
-            *last_error = create_udp_socket(
-                config,
-                socket_fd,
-                server_address);
-            if (*last_error == 0) {
-                return 0;
+                attempt);
+            if (connect_result == CONNECT_RESULT_MENU) {
+                return CONNECT_RESULT_MENU;
             }
-            sceNetApctlDisconnect();
+            if (connect_result == 0) {
+                *last_error = create_udp_socket(
+                    config,
+                    socket_fd,
+                    server_address);
+                if (*last_error == 0) {
+                    return 0;
+                }
+                sceNetApctlDisconnect();
+            }
         }
 
         ++attempt;
@@ -591,13 +751,14 @@ static int reconnect_wifi_and_socket(
     return -1;
 }
 
-static void run_controller_sender(
+static int run_controller_sender(
     int *socket_fd,
     struct sockaddr_in *server_address,
     const NiwPspToPcConfig *config,
     int profile_id,
     char local_ip[16],
     uint32_t session_token,
+    uint32_t *next_sequence,
     const char *pairing_code,
     BacklightControl *backlight)
 {
@@ -605,7 +766,6 @@ static void run_controller_sender(
     uint8_t ack_buffer[PSP_PAIRING_ACK_SIZE];
     PspInputState input;
     SceCtrlData pad;
-    uint32_t sequence = 0;
     uint64_t period_us =
         (1000000ULL + (uint64_t)config->send_rate - 1ULL) /
         (uint64_t)config->send_rate;
@@ -613,6 +773,7 @@ static void run_controller_sender(
     uint64_t next_apctl_check = next_send;
     uint64_t last_pairing_ack = 0;
     uint64_t display_sleep_due = 0;
+    uint64_t link_menu_held_since = 0;
     int authorized = 0;
     int last_network_error = 0;
     int rendered_authorized = -1;
@@ -625,6 +786,9 @@ static void run_controller_sender(
         uint64_t now = (uint64_t)sceKernelGetSystemTimeWide();
         ssize_t bytes_sent;
 
+        if (sceWlanGetSwitchState() == 0) {
+            return LINK_RESULT_MENU;
+        }
         if (now >= next_apctl_check) {
             int apctl_state = PSP_NET_APCTL_STATE_DISCONNECTED;
             int apctl_result = sceNetApctlGetState(&apctl_state);
@@ -646,18 +810,20 @@ static void run_controller_sender(
                 authorized = 0;
                 last_pairing_ack = 0;
                 reset_pc_discovery(server_address);
-                if (
-                    reconnect_wifi_and_socket(
+                {
+                    int reconnect_result = reconnect_wifi_and_socket(
                         profile_id,
                         pairing_code,
                         local_ip,
                         config,
                         socket_fd,
                         server_address,
-                        &last_network_error
-                    ) < 0
-                ) {
-                    return;
+                        &last_network_error);
+                    if (reconnect_result != 0) {
+                        return reconnect_result == CONNECT_RESULT_MENU
+                            ? LINK_RESULT_MENU
+                            : LINK_RESULT_STOP;
+                    }
                 }
                 now = (uint64_t)sceKernelGetSystemTimeWide();
                 next_send = now;
@@ -677,6 +843,36 @@ static void run_controller_sender(
         if (sample_sender_controller(&pad) <= 0) {
             last_network_error = -3;
         } else {
+            uint32_t input_buttons = pad.Buttons;
+
+            if (
+                (pad.Buttons & LINK_MENU_CHORD) == LINK_MENU_CHORD
+            ) {
+                backlight_turn_on(backlight);
+                display_sleep_due = now + DISPLAY_SLEEP_DELAY_US;
+                input_buttons &= ~LINK_MENU_CHORD;
+            }
+            if (
+                link_menu_chord_held(
+                    pad.Buttons,
+                    now,
+                    &link_menu_held_since)
+            ) {
+                encode_neutral_input(
+                    packet_buffer,
+                    *next_sequence,
+                    session_token,
+                    now);
+                sendto(
+                    *socket_fd,
+                    packet_buffer,
+                    sizeof(packet_buffer),
+                    0,
+                    (const struct sockaddr *)server_address,
+                    sizeof(*server_address));
+                ++*next_sequence;
+                return LINK_RESULT_MENU;
+            }
             if (
                 backlight->is_off &&
                 (pad.Buttons & (PSP_CTRL_HOME | PSP_CTRL_SCREEN)) != 0
@@ -684,8 +880,8 @@ static void run_controller_sender(
                 backlight_turn_on(backlight);
                 display_sleep_due = now + DISPLAY_SLEEP_DELAY_US;
             }
-            input.sequence = sequence;
-            input.buttons = map_buttons(pad.Buttons);
+            input.sequence = *next_sequence;
+            input.buttons = map_buttons(input_buttons);
             input.analog_x = pad.Lx;
             input.analog_y = pad.Ly;
             input.session_token = session_token;
@@ -699,7 +895,11 @@ static void run_controller_sender(
                 0,
                 (const struct sockaddr *)server_address,
                 sizeof(*server_address));
-            ++sequence; /* uint32 wrap is intentional and protocol-defined. */
+            /*
+             * One sequence spans USB and Wi-Fi for this PSP app session.
+             * uint32 wrap is intentional and protocol-defined.
+             */
+            ++*next_sequence;
 
             if (bytes_sent == (ssize_t)sizeof(packet_buffer)) {
                 last_network_error = 0;
@@ -795,11 +995,185 @@ static void run_controller_sender(
                 pairing_code,
                 authorized,
                 last_network_error,
-                config->send_rate);
+                config->send_rate,
+                0);
             rendered_authorized = authorized;
             rendered_network_error = last_network_error;
         }
     }
+    return LINK_RESULT_STOP;
+}
+
+static int run_controller_sender_usb(
+    NiwUsbTransport *transport,
+    const NiwPspToPcConfig *config,
+    uint32_t session_token,
+    uint32_t *next_sequence,
+    const char *pairing_code,
+    BacklightControl *backlight)
+{
+    uint8_t packet_buffer[PSP_INPUT_PACKET_SIZE];
+    uint8_t ack_buffer[PSP_PAIRING_ACK_SIZE];
+    PspInputState input;
+    SceCtrlData pad;
+    uint64_t period_us =
+        (1000000ULL + (uint64_t)config->send_rate - 1ULL) /
+        (uint64_t)config->send_rate;
+    uint64_t next_send = (uint64_t)sceKernelGetSystemTimeWide();
+    uint64_t last_pairing_ack = 0;
+    uint64_t display_sleep_due = 0;
+    uint64_t link_menu_held_since = 0;
+    int authorized = 0;
+    int last_usb_error = 0;
+    int rendered_authorized = -1;
+    int rendered_usb_error = -1;
+    uint32_t usb_debug = 0;
+    uint32_t rendered_usb_debug = UINT32_MAX;
+
+    memset(&input, 0, sizeof(input));
+    memset(&pad, 0, sizeof(pad));
+
+    while (!g_exit_requested && usb_transport_cable_connected()) {
+        uint64_t now = (uint64_t)sceKernelGetSystemTimeWide();
+        int bytes_sent;
+
+        if (now < next_send) {
+            sceKernelDelayThread((SceUInt)(next_send - now));
+            continue;
+        }
+
+        if (sample_sender_controller(&pad) <= 0) {
+            last_usb_error = -3;
+        } else {
+            uint32_t input_buttons = pad.Buttons;
+
+            if (
+                (pad.Buttons & LINK_MENU_CHORD) == LINK_MENU_CHORD
+            ) {
+                backlight_turn_on(backlight);
+                display_sleep_due = now + DISPLAY_SLEEP_DELAY_US;
+                input_buttons &= ~LINK_MENU_CHORD;
+            }
+            if (
+                link_menu_chord_held(
+                    pad.Buttons,
+                    now,
+                    &link_menu_held_since)
+            ) {
+                encode_neutral_input(
+                    packet_buffer,
+                    *next_sequence,
+                    session_token,
+                    now);
+                usb_transport_send(
+                    transport,
+                    packet_buffer,
+                    sizeof(packet_buffer));
+                ++*next_sequence;
+                return LINK_RESULT_MENU;
+            }
+            if (
+                backlight->is_off &&
+                (pad.Buttons & (PSP_CTRL_HOME | PSP_CTRL_SCREEN)) != 0
+            ) {
+                backlight_turn_on(backlight);
+                display_sleep_due = now + DISPLAY_SLEEP_DELAY_US;
+            }
+            input.sequence = *next_sequence;
+            input.buttons = map_buttons(input_buttons);
+            input.analog_x = pad.Lx;
+            input.analog_y = pad.Ly;
+            input.session_token = session_token;
+            input.timestamp_us = now;
+            psp_input_encode(packet_buffer, &input);
+            bytes_sent = usb_transport_send(
+                transport,
+                packet_buffer,
+                sizeof(packet_buffer));
+            ++*next_sequence;
+            last_usb_error =
+                bytes_sent == (int)sizeof(packet_buffer)
+                    ? 0
+                    : bytes_sent < 0 ? bytes_sent : -2;
+        }
+
+        {
+            unsigned int ack_count;
+            for (
+                ack_count = 0;
+                ack_count < MAX_ACK_DATAGRAMS_PER_CYCLE;
+                ++ack_count
+            ) {
+                int bytes_received = usb_transport_receive(
+                    transport,
+                    ack_buffer,
+                    sizeof(ack_buffer));
+                if (bytes_received <= 0) {
+                    break;
+                }
+                if (
+                    bytes_received == (int)sizeof(ack_buffer) &&
+                    psp_pairing_ack_matches(ack_buffer, session_token)
+                ) {
+                    last_pairing_ack = now;
+                    if (!authorized) {
+                        set_power_save_clock();
+                        display_sleep_due =
+                            now + DISPLAY_SLEEP_DELAY_US;
+                    }
+                    authorized = 1;
+                }
+            }
+        }
+
+        if (
+            authorized &&
+            now - last_pairing_ack > PAIRING_ACK_TIMEOUT_US
+        ) {
+            backlight_turn_on(backlight);
+            set_performance_clock();
+            authorized = 0;
+            display_sleep_due = 0;
+        }
+        if (
+            authorized &&
+            display_sleep_due != 0 &&
+            now >= display_sleep_due
+        ) {
+            backlight_turn_off(backlight);
+            display_sleep_due = 0;
+        }
+
+        next_send += period_us;
+        now = (uint64_t)sceKernelGetSystemTimeWide();
+        if (now > next_send + period_us * 4ULL) {
+            next_send = now + period_us;
+        }
+        usb_debug = usb_transport_descriptor_debug(transport);
+        if (
+            authorized != rendered_authorized ||
+            last_usb_error != rendered_usb_error ||
+            usb_debug != rendered_usb_debug
+        ) {
+            if (!authorized && last_usb_error == -1) {
+                ui_render_usb_waiting(
+                    pairing_code,
+                    config->send_rate,
+                    usb_debug);
+            } else {
+                render_sender_status(
+                    pairing_code,
+                    authorized,
+                    last_usb_error,
+                    config->send_rate,
+                    1);
+            }
+            rendered_authorized = authorized;
+            rendered_usb_error = last_usb_error;
+            rendered_usb_debug = usb_debug;
+        }
+    }
+    return g_exit_requested ? LINK_RESULT_STOP : LINK_RESULT_MENU;
 }
 
 static void show_fatal_error(
@@ -811,25 +1185,42 @@ static void show_fatal_error(
     sceKernelDelayThread(3000000);
 }
 
+static void show_link_error(
+    const char *pairing_code,
+    const char *title,
+    const char *message,
+    int error)
+{
+    ui_render_error(pairing_code, title, message, error);
+    sceKernelDelayThread(1500000);
+}
+
 int main(int argc, char *argv[])
 {
     NiwPspToPcConfig config;
     struct sockaddr_in server_address;
     char local_ip[16] = "unknown";
     int callback_thread_id;
+    int selected_transport = LINK_USB;
     int profile_id = -1;
     int socket_fd = -1;
     int common_module_loaded = 0;
     int inet_module_loaded = 0;
     int inet_initialized = 0;
     int wifi_connected = 0;
+    int usb_started = 0;
+    int usb_error = 0;
     int error = 0;
     uint32_t session_token;
+    uint32_t input_sequence = 0;
     char pairing_code[6];
     char config_path[256];
     BacklightControl backlight;
+    NiwUsbTransport usb_transport;
 
     backlight_init(&backlight);
+    memset(&usb_transport, 0, sizeof(usb_transport));
+    usb_transport.module_id = -1;
     ui_init();
     session_token = generate_session_token();
     format_session_token(session_token, pairing_code);
@@ -899,97 +1290,181 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    if (sceWlanGetSwitchState() == 0) {
-        show_fatal_error(
-            pairing_code,
-            "WLAN unavailable/off; PSP Street is unsupported",
-            0);
-        sceKernelExitGame();
-        return 1;
-    }
+    while (!g_exit_requested) {
+        int link_result;
+        int choice = select_transport(selected_transport);
 
-    error = sceUtilityLoadNetModule(PSP_NET_MODULE_COMMON);
-    if (error < 0) {
-        show_fatal_error(
-            pairing_code,
-            "Could not load network module",
-            error);
-        goto cleanup;
-    }
-    common_module_loaded = 1;
+        if (choice < 0 || g_exit_requested) {
+            break;
+        }
+        selected_transport = choice;
+        backlight_turn_on(&backlight);
+        set_performance_clock();
 
-    error = sceUtilityLoadNetModule(PSP_NET_MODULE_INET);
-    if (error < 0) {
-        show_fatal_error(
-            pairing_code,
-            "Could not load internet module",
-            error);
-        goto cleanup;
-    }
-    inet_module_loaded = 1;
+        if (choice == LINK_USB) {
+            int return_to_menu = 0;
 
-    profile_id = select_network_profile(pairing_code);
-    if (profile_id < 0 || g_exit_requested) {
-        goto cleanup;
-    }
+            ui_render_connecting(NULL, "INITIALIZING USB", 1);
+            usb_error = usb_transport_start(
+                &usb_transport,
+                argc > 0 ? argv[0] : NULL);
+            if (usb_error != 0) {
+                show_link_error(
+                    NULL,
+                    "USB UNAVAILABLE",
+                    "USB initialization failed",
+                    usb_error);
+                continue;
+            }
+            usb_started = 1;
+            /*
+             * Starting the bus makes the physical cable state reliable across
+             * firmware variants and starts Windows enumeration.
+             */
+            sceKernelDelayThread(250000);
+            ui_render_connecting(NULL, "CONNECT USB DATA CABLE", 0);
+            while (
+                !g_exit_requested &&
+                !usb_transport_cable_connected()
+            ) {
+                if (link_menu_button_pressed()) {
+                    wait_for_button_release(PSP_CTRL_CIRCLE);
+                    return_to_menu = 1;
+                    break;
+                }
+                sceKernelDelayThread(50000);
+            }
+            if (!return_to_menu && !g_exit_requested) {
+                ui_render_connecting(NULL, "USB CABLE DETECTED", 2);
+                link_result = run_controller_sender_usb(
+                    &usb_transport,
+                    &config,
+                    session_token,
+                    &input_sequence,
+                    pairing_code,
+                    &backlight);
+                if (link_result == LINK_RESULT_STOP) {
+                    g_exit_requested = 1;
+                }
+            }
+            usb_transport_stop(&usb_transport);
+            usb_started = 0;
+            backlight_turn_on(&backlight);
+            set_performance_clock();
+            continue;
+        }
 
-    ui_render_connecting(pairing_code, "INITIALIZING", 0);
+        if (sceWlanGetSwitchState() == 0) {
+            continue;
+        }
+        if (!common_module_loaded) {
+            error = sceUtilityLoadNetModule(PSP_NET_MODULE_COMMON);
+            if (error < 0) {
+                show_link_error(
+                    pairing_code,
+                    "WI-FI UNAVAILABLE",
+                    "Could not load network module",
+                    error);
+                continue;
+            }
+            common_module_loaded = 1;
+        }
+        if (!inet_module_loaded) {
+            error = sceUtilityLoadNetModule(PSP_NET_MODULE_INET);
+            if (error < 0) {
+                show_link_error(
+                    pairing_code,
+                    "WI-FI UNAVAILABLE",
+                    "Could not load internet module",
+                    error);
+                continue;
+            }
+            inet_module_loaded = 1;
+        }
+        if (!inet_initialized) {
+            ui_render_connecting(pairing_code, "INITIALIZING", 0);
+            error = pspSdkInetInit();
+            if (error != 0) {
+                show_link_error(
+                    pairing_code,
+                    "WI-FI UNAVAILABLE",
+                    "Internet subsystem init failed",
+                    error);
+                continue;
+            }
+            inet_initialized = 1;
+        }
 
-    error = pspSdkInetInit();
-    if (error != 0) {
-        show_fatal_error(
-            pairing_code,
-            "Internet subsystem init failed",
-            error);
-        goto cleanup;
-    }
-    inet_initialized = 1;
-
-    if (
-        connect_wifi(
+        profile_id = select_network_profile(pairing_code);
+        if (profile_id == CONNECT_RESULT_MENU) {
+            continue;
+        }
+        if (profile_id < 0 || g_exit_requested) {
+            break;
+        }
+        error = 0;
+        link_result = connect_wifi(
             profile_id,
             pairing_code,
             local_ip,
             &error,
             CONNECTION_TIMEOUT_US,
-            0
-        ) < 0
-    ) {
-        if (!g_exit_requested) {
-            show_fatal_error(
-                pairing_code,
-                "Wi-Fi connection failed or timed out",
-                error);
+            0);
+        if (link_result == CONNECT_RESULT_MENU) {
+            continue;
         }
-        goto cleanup;
-    }
-    wifi_connected = 1;
+        if (link_result < 0) {
+            sceNetApctlDisconnect();
+            show_link_error(
+                pairing_code,
+                "WI-FI CONNECTION ERROR",
+                "Connection failed or timed out",
+                error);
+            continue;
+        }
+        wifi_connected = 1;
 
-    error = create_udp_socket(
-        &config,
-        &socket_fd,
-        &server_address);
-    if (error < 0) {
-        show_fatal_error(
+        error = create_udp_socket(
+            &config,
+            &socket_fd,
+            &server_address);
+        if (error < 0) {
+            sceNetApctlDisconnect();
+            wifi_connected = 0;
+            show_link_error(
+                pairing_code,
+                "WI-FI CONNECTION ERROR",
+                "Server address or UDP socket error",
+                error);
+            continue;
+        }
+
+        link_result = run_controller_sender(
+            &socket_fd,
+            &server_address,
+            &config,
+            profile_id,
+            local_ip,
+            session_token,
+            &input_sequence,
             pairing_code,
-            "Server address or UDP socket error",
-            error);
-        goto cleanup;
+            &backlight);
+        close(socket_fd);
+        socket_fd = -1;
+        sceNetApctlDisconnect();
+        wifi_connected = 0;
+        backlight_turn_on(&backlight);
+        set_performance_clock();
+        if (link_result == LINK_RESULT_STOP) {
+            break;
+        }
     }
 
-    run_controller_sender(
-        &socket_fd,
-        &server_address,
-        &config,
-        profile_id,
-        local_ip,
-        session_token,
-        pairing_code,
-        &backlight);
-
-cleanup:
     backlight_turn_on(&backlight);
-    ui_render_shutdown(pairing_code);
+    ui_render_shutdown(NULL);
+    if (usb_started) {
+        usb_transport_stop(&usb_transport);
+    }
     if (socket_fd >= 0) {
         close(socket_fd);
     }

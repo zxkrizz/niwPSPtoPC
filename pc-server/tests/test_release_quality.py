@@ -83,6 +83,44 @@ class ReleaseQualityTests(unittest.TestCase):
             ROOT / "docs" / "releases" / f"{__version__}.md"
         ).read_text(encoding="utf-8")
         self.assertIn(f"# niwPSPtoPC {__version__}", release_notes)
+        root_readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn(f"Current release: **{__version__}**", root_readme)
+        for name in ("README-WINDOWS.txt", "README-PSP.txt"):
+            package_readme = (
+                ROOT / "packaging" / name
+            ).read_text(encoding="utf-8")
+            self.assertIn(f"niwPSPtoPC {__version__}", package_readme)
+
+        manifest = (
+            ROOT / "packaging" / "windows" / "niwPSPtoPC.exe.manifest"
+        ).read_text(encoding="utf-8")
+        self.assertIn(f'version="{__version__}.0"', manifest)
+
+    def test_public_branding_covers_wired_and_wireless_modes(self) -> None:
+        required_phrase = "Ultimate Wireless and Wired Gamepad"
+        files = (
+            ROOT / "README.md",
+            ROOT / "packaging" / "README-WINDOWS.txt",
+            ROOT / "packaging" / "README-PSP.txt",
+            ROOT / "docs" / "releases" / f"{__version__}.md",
+        )
+        for path in files:
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertIn(
+                    required_phrase,
+                    path.read_text(encoding="utf-8"),
+                )
+
+        current_docs = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (
+                ROOT / "README.md",
+                ROOT / "docs" / "usb.md",
+                ROOT / "packaging" / "README-WINDOWS.txt",
+                ROOT / "packaging" / "README-PSP.txt",
+            )
+        ).lower()
+        self.assertNotIn("development preview", current_docs)
 
     def test_pspdev_image_is_pinned(self) -> None:
         image = (ROOT / "scripts" / "pspdev-image.txt").read_text(
@@ -137,6 +175,49 @@ class ReleaseQualityTests(unittest.TestCase):
         self.assertIn("gh release upload", workflow)
         self.assertIn("--clobber", workflow)
         self.assertIn("--notes-file $notes", workflow)
+        self.assertIn("bash ./scripts/package-psp.sh", workflow)
+
+    def test_release_packages_complete_psp_usb_runtime(self) -> None:
+        package_script = (
+            ROOT / "scripts" / "package-release.ps1"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"psp-client\\usbhostfs.prx"', package_script)
+        self.assertIn(
+            'Copy-Item -LiteralPath $PspUsbHostFs -Destination $PspStage',
+            package_script,
+        )
+        self.assertIn(
+            'Copy-Item -LiteralPath $Notices -Destination $PspStage',
+            package_script,
+        )
+        self.assertIn('"niwPSPtoPC/usbhostfs.prx"', package_script)
+        self.assertIn(
+            '"niwPSPtoPC/THIRD_PARTY_NOTICES.txt"',
+            package_script,
+        )
+
+        psp_package = (
+            ROOT / "scripts" / "package-psp.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("USBHOSTFS_PATH=", psp_package)
+        self.assertIn("usbhostfs-winusb.patch", psp_package)
+
+    def test_public_source_has_no_local_workspace_identity(self) -> None:
+        public_files = (
+            ROOT / "README.md",
+            ROOT / "CHANGELOG.md",
+            ROOT / "SECURITY.md",
+            ROOT / "docs" / "usb.md",
+            ROOT / "packaging" / "README-WINDOWS.txt",
+            ROOT / "packaging" / "README-PSP.txt",
+            ROOT / "scripts" / "build-windows.ps1",
+            ROOT / "scripts" / "package-release.ps1",
+        )
+        forbidden = ("niw3k", "codex-clipboard", "AppData\\Local\\Temp")
+        for path in public_files:
+            with self.subTest(path=path.relative_to(ROOT)):
+                text = path.read_text(encoding="utf-8")
+                self.assertFalse(any(value in text for value in forbidden))
 
     def test_windows_manifest_is_embedded_and_verified(self) -> None:
         manifest = (

@@ -125,6 +125,8 @@ if ($RunningExecutable) {
     --specpath $WorkDirectory `
     --paths (Join-Path $ProjectRoot "pc-server") `
     --hidden-import vgamepad `
+    --hidden-import usb.backend.libusb1 `
+    --collect-all libusb_package `
     --collect-submodules vgamepad.win `
     --exclude-module vgamepad.lin `
     --add-binary "$VigemClient;vgamepad/win/vigem/client/x64" `

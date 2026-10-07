@@ -57,14 +57,12 @@ jobs:
             --workdir /workspace \
             "$PSPDEV_IMAGE" \
             bash ./scripts/build-psp.sh
-      - name: Stage PSP artifact
-        run: |
-          mkdir -p dist/niwPSPtoPC
-          cp psp-client/EBOOT.PBP psp-client/config.ini dist/niwPSPtoPC/
+      - name: Stage complete PSP artifact
+        run: bash ./scripts/package-psp.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-psp
-          path: dist/niwPSPtoPC
+          path: dist/niwPSPtoPC/
           if-no-files-found: error
 
   windows:

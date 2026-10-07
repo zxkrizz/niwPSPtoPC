@@ -239,22 +239,29 @@ static void draw_header(const char *pairing_code)
     draw_logo(16, 10);
     draw_large_text(64, 12, 2, COLOR_TEXT, "NIWPSP");
     draw_large_text(136, 12, 2, COLOR_ACCENT, "TOPC");
-    draw_text(64, 33, COLOR_MUTED, "PSP WI-FI CONTROLLER");
-    snprintf(code_label, sizeof(code_label), "CODE  %c %c %c %c %c",
-             pairing_code[0],
-             pairing_code[1],
-             pairing_code[2],
-             pairing_code[3],
-             pairing_code[4]);
-    draw_text(326, 18, COLOR_ACCENT, code_label);
+    draw_text(64, 33, COLOR_MUTED, "WIRELESS + WIRED GAMEPAD");
+    if (pairing_code != NULL) {
+        snprintf(code_label, sizeof(code_label), "CODE  %c %c %c %c %c",
+                 pairing_code[0],
+                 pairing_code[1],
+                 pairing_code[2],
+                 pairing_code[3],
+                 pairing_code[4]);
+        draw_text(326, 18, COLOR_ACCENT, code_label);
+    }
     fill_rect(16, 56, 448, 2, COLOR_BORDER);
 }
 
 static void draw_footer(const char *left, const char *right)
 {
+    int right_x = 454 - (int)strlen(right) * 7;
+
+    if (right_x < 220) {
+        right_x = 220;
+    }
     draw_panel(16, 238, 448, 22, COLOR_PANEL_LIGHT);
     draw_text(26, 245, COLOR_TEXT, left);
-    draw_text(358, 245, COLOR_MUTED, right);
+    draw_text(right_x, 245, COLOR_MUTED, right);
 }
 
 static void draw_status_dot(int x, int y, uint32_t color)
@@ -269,26 +276,41 @@ static void draw_status_layout(
     const char *status,
     const char *detail,
     uint32_t color,
-    unsigned int send_rate)
+    unsigned int send_rate,
+    int is_usb)
 {
     int code_width;
     char rate_label[24];
 
     draw_background();
-    draw_header(pairing_code);
+    draw_header(is_usb ? NULL : pairing_code);
 
     draw_panel(16, 72, 214, 150, COLOR_PANEL);
-    draw_text(28, 84, COLOR_MUTED, "PAIRING CODE");
-    fill_rect(28, 100, 190, 2, COLOR_BORDER);
-    code_width = large_text_width(pairing_code, 4);
-    draw_large_text(
-        16 + (214 - code_width) / 2,
-        119,
-        4,
-        COLOR_ACCENT,
-        pairing_code);
-    draw_text(47, 180, COLOR_MUTED, "ENTER THIS CODE ON PC");
-    draw_text(78, 198, COLOR_TEXT, "NEW ON EVERY START");
+    if (is_usb) {
+        draw_text(28, 84, COLOR_MUTED, "USB CONNECTION");
+        fill_rect(28, 100, 190, 2, COLOR_BORDER);
+        draw_centered_large_text(
+            16,
+            214,
+            118,
+            4,
+            COLOR_ACCENT,
+            "USB");
+        draw_text(61, 180, COLOR_TEXT, "NO CODE REQUIRED");
+        draw_text(68, 198, COLOR_MUTED, "LOCAL CABLE LINK");
+    } else {
+        draw_text(28, 84, COLOR_MUTED, "PAIRING CODE");
+        fill_rect(28, 100, 190, 2, COLOR_BORDER);
+        code_width = large_text_width(pairing_code, 4);
+        draw_large_text(
+            16 + (214 - code_width) / 2,
+            119,
+            4,
+            COLOR_ACCENT,
+            pairing_code);
+        draw_text(47, 180, COLOR_MUTED, "ENTER THIS CODE ON PC");
+        draw_text(78, 198, COLOR_TEXT, "NEW ON EVERY START");
+    }
 
     draw_panel(242, 72, 222, 150, COLOR_PANEL);
     draw_text(256, 84, COLOR_MUTED, "LINK STATUS");
@@ -296,8 +318,8 @@ static void draw_status_layout(
     draw_status_dot(258, 122, color);
     draw_text_clipped(278, 119, 24, color, status);
     draw_text_clipped(258, 145, 27, COLOR_TEXT, detail);
-    draw_text(258, 176, COLOR_MUTED, "WI-FI");
-    draw_text(370, 176, COLOR_ACCENT, "CONNECTED");
+    draw_text(258, 176, COLOR_MUTED, "TRANSPORT");
+    draw_text(370, 176, COLOR_ACCENT, is_usb ? "USB" : "WI-FI");
     draw_text(258, 197, COLOR_MUTED, "VIRTUAL PAD");
     draw_text(
         370,
@@ -305,7 +327,11 @@ static void draw_status_layout(
         color,
         strcmp(status, "CONTROLLER READY") == 0 ? "READY" : "WAITING");
 
-    snprintf(rate_label, sizeof(rate_label), "V2 / %u HZ", send_rate);
+    snprintf(
+        rate_label,
+        sizeof(rate_label),
+        "%uHZ  L+R+START MENU",
+        send_rate);
     draw_footer("HOME  EXIT", rate_label);
 }
 
@@ -319,8 +345,9 @@ void ui_init(void)
 
 void ui_render_startup(const char *pairing_code)
 {
+    (void)pairing_code;
     draw_background();
-    draw_header(pairing_code);
+    draw_header(NULL);
     draw_panel(16, 76, 448, 142, COLOR_PANEL);
     draw_centered_large_text(
         16,
@@ -334,6 +361,51 @@ void ui_render_startup(const char *pairing_code)
     draw_footer("HOME  EXIT", "NIW LINK");
 }
 
+void ui_render_transport_selector(int selected, int wifi_available)
+{
+    uint32_t usb_border = selected == 0 ? COLOR_ACCENT : COLOR_BORDER;
+    uint32_t wifi_border =
+        selected == 1 && wifi_available ? COLOR_ACCENT : COLOR_BORDER;
+    uint32_t wifi_text = wifi_available ? COLOR_TEXT : COLOR_BORDER;
+    uint32_t wifi_detail = wifi_available ? COLOR_MUTED : COLOR_DANGER;
+
+    draw_background();
+    draw_header(NULL);
+    draw_panel(16, 72, 448, 154, COLOR_PANEL);
+    draw_text(30, 84, COLOR_ACCENT, "01 // SELECT CONNECTION");
+    fill_rect(30, 102, 420, 2, COLOR_BORDER);
+
+    fill_rect(30, 114, 196, 72, usb_border);
+    fill_rect(32, 116, 192, 68, COLOR_SCREEN);
+    draw_centered_large_text(
+        30,
+        196,
+        126,
+        3,
+        selected == 0 ? COLOR_ACCENT : COLOR_TEXT,
+        "USB");
+    draw_text(67, 163, COLOR_MUTED, "NO CODE REQUIRED");
+
+    fill_rect(254, 114, 196, 72, wifi_border);
+    fill_rect(256, 116, 192, 68, COLOR_SCREEN);
+    draw_centered_large_text(
+        254,
+        196,
+        126,
+        3,
+        selected == 1 && wifi_available ? COLOR_ACCENT : wifi_text,
+        "WIFI");
+    draw_text(
+        wifi_available ? 303 : 286,
+        163,
+        wifi_detail,
+        wifi_available ? "PAIR WITH CODE" : "WLAN SWITCH OFF");
+
+    draw_text(30, 198, COLOR_TEXT, "LEFT / RIGHT  CHANGE");
+    draw_text(351, 198, COLOR_ACCENT, "X  SELECT");
+    draw_footer("HOME  EXIT", "CHOOSE LINK");
+}
+
 void ui_render_no_profiles(const char *pairing_code)
 {
     draw_background();
@@ -344,8 +416,8 @@ void ui_render_no_profiles(const char *pairing_code)
     fill_rect(32, 114, 416, 2, COLOR_BORDER);
     draw_text(32, 132, COLOR_TEXT, "ADD A CONNECTION IN PSP SETTINGS:");
     draw_text(32, 151, COLOR_ACCENT, "SETTINGS > NETWORK SETTINGS");
-    draw_text(32, 184, COLOR_MUTED, "THEN START NIWPSPTOPC AGAIN.");
-    draw_footer("HOME  EXIT", "SETUP REQUIRED");
+    draw_text(32, 184, COLOR_MUTED, "CIRCLE RETURNS TO CONNECTION MENU.");
+    draw_footer("CIRCLE  CONNECTION MENU", "SETUP REQUIRED");
 }
 
 void ui_render_profile_selector(
@@ -369,7 +441,7 @@ void ui_render_profile_selector(
     draw_text(432, 138, COLOR_ACCENT, ">");
     draw_text(30, 194, COLOR_TEXT, "LEFT / RIGHT  CHANGE");
     draw_text(274, 194, COLOR_ACCENT, "X  CONNECT");
-    draw_footer("HOME  EXIT", "SELECT PROFILE");
+    draw_footer("CIRCLE  CONNECTION MENU", "SELECT PROFILE");
 }
 
 void ui_render_connecting(
@@ -378,6 +450,7 @@ void ui_render_connecting(
     int progress_stage)
 {
     int index;
+    int is_usb = strstr(state_name, "USB") != NULL;
 
     if (progress_stage < 0) {
         progress_stage = 0;
@@ -387,9 +460,13 @@ void ui_render_connecting(
     }
 
     draw_background();
-    draw_header(pairing_code);
+    draw_header(is_usb ? NULL : pairing_code);
     draw_panel(16, 76, 448, 142, COLOR_PANEL);
-    draw_text(30, 90, COLOR_ACCENT, "02 // CONNECTING TO WI-FI");
+    draw_text(
+        30,
+        90,
+        COLOR_ACCENT,
+        is_usb ? "02 // CONNECTING USB CABLE" : "02 // CONNECTING TO WI-FI");
     fill_rect(30, 108, 420, 2, COLOR_BORDER);
     draw_text(30, 127, COLOR_MUTED, "NETWORK STATUS");
     draw_text_clipped(178, 127, 34, COLOR_TEXT, state_name);
@@ -401,8 +478,14 @@ void ui_render_connecting(
             14,
             index <= progress_stage ? COLOR_ACCENT : COLOR_PANEL_LIGHT);
     }
-    draw_text(30, 188, COLOR_TEXT, "WAITING FOR ACCESS POINT...");
-    draw_footer("HOME  EXIT", "WI-FI LINK");
+    draw_text(
+        30,
+        188,
+        COLOR_TEXT,
+        is_usb ? "WAITING FOR WINDOWS APP..." : "WAITING FOR ACCESS POINT...");
+    draw_footer(
+        "CIRCLE  CONNECTION MENU",
+        is_usb ? "USB LINK" : "WI-FI LINK");
 }
 
 void ui_render_reconnecting(
@@ -435,39 +518,80 @@ void ui_render_reconnecting(
     draw_text_clipped(30, 130, 44, COLOR_TEXT, state_name);
     draw_text(30, 158, COLOR_MUTED, attempt_label);
     draw_text(30, 184, COLOR_ACCENT, retry_label);
-    draw_footer("HOME  CANCEL / EXIT", "AUTO RETRY");
+    draw_footer("CIRCLE  CONNECTION MENU", "AUTO RETRY");
 }
 
 void ui_render_sender(
     const char *pairing_code,
     int authorized,
     int network_error,
-    unsigned int send_rate)
+    unsigned int send_rate,
+    int is_usb)
 {
-    if (network_error != 0) {
-        char detail[32];
-        snprintf(detail, sizeof(detail), "UDP ERROR %d", network_error);
+    if (is_usb && network_error == -1) {
         draw_status_layout(
             pairing_code,
-            "NETWORK ERROR",
+            "WAITING FOR PC",
+            "WINDOWS USB ENUMERATION",
+            COLOR_WARN,
+            send_rate,
+            is_usb);
+    } else if (network_error != 0) {
+        char detail[32];
+        snprintf(
+            detail,
+            sizeof(detail),
+            "%s ERROR %d",
+            is_usb ? "USB" : "UDP",
+            network_error);
+        draw_status_layout(
+            pairing_code,
+            is_usb ? "USB LINK ERROR" : "NETWORK ERROR",
             detail,
             COLOR_DANGER,
-            send_rate);
+            send_rate,
+            is_usb);
     } else if (authorized) {
         draw_status_layout(
             pairing_code,
             "CONTROLLER READY",
-            "PC LINK ACTIVE",
+            is_usb ? "USB LINK ACTIVE" : "WI-FI LINK ACTIVE",
             COLOR_ACCENT,
-            send_rate);
+            send_rate,
+            is_usb);
     } else {
         draw_status_layout(
             pairing_code,
             "WAITING FOR PC",
-            "ENTER CODE IN DESKTOP APP",
+            is_usb ? "USB CABLE CONNECTED" : "ENTER CODE IN DESKTOP APP",
             COLOR_WARN,
-            send_rate);
+            send_rate,
+            is_usb);
     }
+}
+
+void ui_render_usb_waiting(
+    const char *pairing_code,
+    unsigned int send_rate,
+    uint32_t descriptor_debug)
+{
+    char detail[32];
+
+    snprintf(
+        detail,
+        sizeof(detail),
+        "WCID %02X REQ %02X/%02X/%02X",
+        (unsigned int)(descriptor_debug & 0xFF),
+        (unsigned int)((descriptor_debug >> 8) & 0xFF),
+        (unsigned int)((descriptor_debug >> 16) & 0xFF),
+        (unsigned int)((descriptor_debug >> 24) & 0xFF));
+    draw_status_layout(
+        pairing_code,
+        "WAITING FOR PC",
+        detail,
+        COLOR_WARN,
+        send_rate,
+        1);
 }
 
 void ui_render_error(
@@ -487,8 +611,13 @@ void ui_render_error(
     draw_text_clipped(30, 132, 58, COLOR_TEXT, message);
     snprintf(error_code, sizeof(error_code), "ERROR 0x%08X", (unsigned int)error);
     draw_text(30, 158, COLOR_MUTED, error_code);
-    draw_text(30, 190, COLOR_WARN, "RETURNING TO PSP MENU...");
-    draw_footer("HOME  EXIT", "STARTUP ERROR");
+    if (strcmp(title, "STARTUP ERROR") == 0) {
+        draw_text(30, 190, COLOR_WARN, "RETURNING TO PSP MENU...");
+        draw_footer("HOME  EXIT", "STARTUP ERROR");
+    } else {
+        draw_text(30, 190, COLOR_WARN, "RETURNING TO CONNECTION MENU...");
+        draw_footer("HOME  EXIT", "LINK ERROR");
+    }
 }
 
 void ui_render_shutdown(const char *pairing_code)
