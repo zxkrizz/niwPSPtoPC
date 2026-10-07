@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import unittest
+import sys
 from unittest.mock import patch
+
+if sys.platform != "win32":
+    raise unittest.SkipTest("WinUSB provisioning requires Windows")
 
 from pc_server.winusb_setup import (
     WINUSB_INTERFACE_GUID,
